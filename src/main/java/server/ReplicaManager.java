@@ -384,8 +384,8 @@ public class ReplicaManager {
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 } finally {
-                    evaluateVoteWindow(voteKey);
                     scheduledVoteEvaluation.remove(voteKey);
+                    evaluateVoteWindow(voteKey);
                 }
             }, "RM" + replicaId + "-VoteWindow-" + voteKey);
             evaluator.setDaemon(true);
