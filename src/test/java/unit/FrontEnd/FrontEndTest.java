@@ -1,5 +1,6 @@
 package unit.FrontEnd;
 
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import server.FrontEnd;
 
@@ -27,7 +28,7 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class FrontEndTest {
 
-    @Test
+    @Test @Disabled("Student 1 — not implemented yet")
     void majorityVoting_returnsCorrectResult() {
         // TODO Student 1:
         // 1. Create a FrontEnd.RequestContext for a known requestID.
@@ -37,7 +38,7 @@ class FrontEndTest {
         fail("Not implemented yet — Student 1");
     }
 
-    @Test
+    @Test @Disabled("Student 1 — not implemented yet")
     void byzantineCounter_incrementsOnMismatch_resetsOnMatch() {
         // TODO Student 1:
         // 1. Use reflection or a test subclass to call processResults() on a FrontEnd instance.
@@ -46,7 +47,7 @@ class FrontEndTest {
         fail("Not implemented yet — Student 1");
     }
 
-    @Test
+    @Test @Disabled("Student 1 — not implemented yet")
     void byzantineThreshold_triggersReplaceRequest() {
         // TODO Student 1:
         // 1. Drive processResults() 3 times with the same replica ID mismatching each time.
@@ -56,7 +57,7 @@ class FrontEndTest {
         fail("Not implemented yet — Student 1");
     }
 
-    @Test
+    @Test @Disabled("Student 1 — not implemented yet")
     void crashSuspect_reportedForNonRespondingReplica() {
         // TODO Student 1:
         // 1. Build a RequestContext where only replicas "1" and "2" have responded.

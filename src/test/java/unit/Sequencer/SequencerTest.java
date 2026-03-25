@@ -1,5 +1,6 @@
 package unit.Sequencer;
 
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import server.Sequencer;
 
@@ -28,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class SequencerTest {
 
-    @Test
+    @Test @Disabled("Student 3 — not implemented yet")
     void requestHandling_assignsMonotonicallyIncreasingSeqNums() {
         // TODO Student 3:
         // 1. Create a Sequencer instance (do NOT call start()).
@@ -38,7 +39,7 @@ class SequencerTest {
         fail("Not implemented yet — Student 3");
     }
 
-    @Test
+    @Test @Disabled("Student 3 — not implemented yet")
     void nackHandling_replaysHistoryBufferForMissedRange() {
         // TODO Student 3:
         // 1. Use reflection to pre-populate historyBuffer with entries for seq 0, 1, 2.
@@ -48,7 +49,7 @@ class SequencerTest {
         fail("Not implemented yet — Student 3");
     }
 
-    @Test
+    @Test @Disabled("Student 3 — not implemented yet")
     void replicaReady_triggersReplayAndUpdatesReplicaList() {
         // TODO Student 3:
         // 1. Pre-populate historyBuffer with entries for seq 0, 1, 2 (via reflection).
