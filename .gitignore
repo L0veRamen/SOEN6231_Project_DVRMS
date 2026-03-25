@@ -10,7 +10,7 @@ target/
 .idea/compiler.xml
 .idea/libraries/
 .idea/copilot.data.migration.ask2agent.xml
-
+.idea/*
 *.iws
 *.iml
 *.ipr

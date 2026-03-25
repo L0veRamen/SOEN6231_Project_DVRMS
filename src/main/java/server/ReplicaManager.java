@@ -66,6 +66,9 @@ public class ReplicaManager {
         new ConcurrentHashMap<>();
     private final ConcurrentHashMap.KeySetView<String, Boolean> scheduledVoteEvaluation =
         ConcurrentHashMap.newKeySet();
+    // Tracks faults already acted on — prevents replaceReplica() running twice for the same fault
+    private final ConcurrentHashMap.KeySetView<String, Boolean> replacedKeys =
+        ConcurrentHashMap.newKeySet();
 
     private static final int HEARTBEAT_INTERVAL_MS = 3000;
     private static final int HEARTBEAT_TIMEOUT_MS = 2000;
@@ -424,7 +427,7 @@ public class ReplicaManager {
             return;
         }
         String targetId = voteKey.substring(splitAt + 1);
-        if (targetId.equals(String.valueOf(replicaId))) {
+        if (targetId.equals(String.valueOf(replicaId)) && replacedKeys.add(voteKey)) {
             replaceReplica();
         }
     }

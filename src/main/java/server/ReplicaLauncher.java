@@ -99,6 +99,10 @@ public class ReplicaLauncher {
                         // Load snapshot into all 3 offices
                         // Format: INIT_STATE:mtlSnapshot|wpgSnapshot|bnfSnapshot
                         String[] snapshots = msg.getField(0).split("\\|");
+                        if (snapshots.length < 3) {
+                            System.err.println("Replica " + replicaId + ": malformed INIT_STATE, ignoring");
+                            break;
+                        }
                         mtl.loadStateSnapshot(snapshots[0]);
                         wpg.loadStateSnapshot(snapshots[1]);
                         bnf.loadStateSnapshot(snapshots[2]);
