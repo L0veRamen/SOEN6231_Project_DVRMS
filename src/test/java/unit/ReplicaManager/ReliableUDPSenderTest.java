@@ -14,6 +14,7 @@ public class ReliableUDPSenderTest {
     void ackReceived_returnsTrue() throws Exception {
         // Start a mock UDP server that replies with ACK
         DatagramSocket mockServer = new DatagramSocket(0); // ephemeral port
+        mockServer.setSoTimeout(1000);
         int serverPort = mockServer.getLocalPort();
 
         Thread serverThread = new Thread(() -> {
@@ -32,14 +33,21 @@ public class ReliableUDPSenderTest {
         });
         serverThread.start();
 
-        ReliableUDPSender sender = new ReliableUDPSender();
-        DatagramSocket clientSocket = new DatagramSocket();
-        boolean result = sender.send("TEST_MSG", InetAddress.getByName("localhost"), serverPort, clientSocket);
-
-        assertTrue(result);
-
-        clientSocket.close();
-        mockServer.close();
-        serverThread.join(2000);
+        DatagramSocket clientSocket = null;
+        try {
+            ReliableUDPSender sender = new ReliableUDPSender();
+            clientSocket = new DatagramSocket();
+            boolean result = sender.send("TEST_MSG", InetAddress.getByName("localhost"), serverPort, clientSocket);
+            assertTrue(result);
+        } finally {
+            if (clientSocket != null && !clientSocket.isClosed()) {
+                clientSocket.close();
+            }
+            if (!mockServer.isClosed()) {
+                mockServer.close();
+            }
+            serverThread.join(2000);
+            assertFalse(serverThread.isAlive(), "Mock server thread should terminate");
+        }
     }
 }

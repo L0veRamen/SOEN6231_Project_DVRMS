@@ -195,26 +195,30 @@ public class ReplicaManager {
             while (true) {
                 DatagramPacket packet = new DatagramPacket(buf, buf.length);
                 socket.receive(packet);
-                String raw = new String(packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8);
-                UDPMessage msg = UDPMessage.parse(raw);
-                maybeAckFaultNotification(msg, socket, packet);
+                try {
+                    String raw = new String(packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8);
+                    UDPMessage msg = UDPMessage.parse(raw);
+                    maybeAckFaultNotification(msg, socket, packet);
 
-                switch (msg.getType()) {
-                    case REPLACE_REQUEST:
-                        handleByzantineReplace(msg, socket);
-                        break;
-                    case CRASH_SUSPECT:
-                        handleCrashSuspect(msg, socket);
-                        break;
-                    case VOTE_BYZANTINE:
-                    case VOTE_CRASH:
-                        handleVote(msg, socket);
-                        break;
-                    case STATE_REQUEST:
-                        handleStateRequest(msg, socket, packet);
-                        break;
-                    default:
-                        break;
+                    switch (msg.getType()) {
+                        case REPLACE_REQUEST:
+                            handleByzantineReplace(msg, socket);
+                            break;
+                        case CRASH_SUSPECT:
+                            handleCrashSuspect(msg, socket);
+                            break;
+                        case VOTE_BYZANTINE:
+                        case VOTE_CRASH:
+                            handleVote(msg, socket);
+                            break;
+                        case STATE_REQUEST:
+                            handleStateRequest(msg, socket, packet);
+                            break;
+                        default:
+                            break;
+                    }
+                } catch (Exception e) {
+                    System.err.println("RM" + replicaId + ": Ignoring malformed packet: " + e.getMessage());
                 }
             }
         } catch (Exception e) {
@@ -343,6 +347,9 @@ public class ReplicaManager {
      * @param socket the RM's listener socket (unused but kept for handler signature)
      */
     protected void handleVote(UDPMessage msg, DatagramSocket socket) {
+        if (msg.fieldCount() < 2) {
+            return;
+        }
         String voteType = msg.getType().name();
         String targetId = normalizeReplicaId(msg.getField(0));
         if (targetId == null || targetId.isEmpty()) {
@@ -355,6 +362,9 @@ public class ReplicaManager {
         String voterDecision;
         String voterId;
         if (msg.getType() == UDPMessage.Type.VOTE_CRASH) {
+            if (msg.fieldCount() < 3) {
+                return;
+            }
             voterDecision = msg.getField(1);            // ALIVE or CRASH_CONFIRMED
             voterId = msg.getField(2);                   // sender RM id
         } else {

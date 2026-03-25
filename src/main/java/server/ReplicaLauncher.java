@@ -102,7 +102,8 @@ public class ReplicaLauncher {
                         mtl.loadStateSnapshot(snapshots[0]);
                         wpg.loadStateSnapshot(snapshots[1]);
                         bnf.loadStateSnapshot(snapshots[2]);
-                        String reply = "ACK:INIT_STATE:" + replicaId + ":" + mtl.getNextExpectedSeq();
+                        int lastSeqNum = mtl.getNextExpectedSeq() - 1;
+                        String reply = "ACK:INIT_STATE:" + replicaId + ":" + lastSeqNum;
                         byte[] replyData = reply.getBytes(StandardCharsets.UTF_8);
                         socket.send(new DatagramPacket(replyData, replyData.length,
                             packet.getAddress(), packet.getPort()));

@@ -700,7 +700,7 @@ public class ReplicaLauncher {
 ```
 
 **Recovery sequence semantics (canonical):**
-- `ACK:INIT_STATE:replicaID:lastSeqNum` uses `lastSeqNum = nextExpectedSeq - 1` (highest sequence already applied by the recovered replica).
+- `ACK:INIT_STATE:replicaID:lastSeqNum` uses `lastSeqNum = nextExpectedSeq - 1` (highest sequence already applied by the recovered replica). Do not send `nextExpectedSeq` directly.
 - `REPLICA_READY:replicaID:host:port:lastSeqNum` uses that same `lastSeqNum`.
 - Sequencer replay starts from `lastSeqNum + 1` for that recovered replica.
 
@@ -1093,25 +1093,30 @@ public class ReplicaManager {
             while (true) {
                 DatagramPacket packet = new DatagramPacket(buf, buf.length);
                 socket.receive(packet);
-                String raw = new String(packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8);
-                UDPMessage msg = UDPMessage.parse(raw);
+                try {
+                    String raw = new String(packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8);
+                    UDPMessage msg = UDPMessage.parse(raw);
 
-                switch (msg.getType()) {
-                    case REPLACE_REQUEST:
-                        handleByzantineReplace(msg, socket);
-                        break;
-                    case CRASH_SUSPECT:
-                        handleCrashSuspect(msg, socket);
-                        break;
-                    case VOTE_BYZANTINE:
-                    case VOTE_CRASH:
-                        handleVote(msg, socket);
-                        break;
-                    case STATE_REQUEST:
-                        handleStateRequest(msg, socket, packet);
-                        break;
-                    default:
-                        break;
+                    switch (msg.getType()) {
+                        case REPLACE_REQUEST:
+                            handleByzantineReplace(msg, socket);
+                            break;
+                        case CRASH_SUSPECT:
+                            handleCrashSuspect(msg, socket);
+                            break;
+                        case VOTE_BYZANTINE:
+                        case VOTE_CRASH:
+                            handleVote(msg, socket);
+                            break;
+                        case STATE_REQUEST:
+                            handleStateRequest(msg, socket, packet);
+                            break;
+                        default:
+                            break;
+                    }
+                } catch (Exception e) {
+                    // Keep RM listener alive on malformed/unexpected datagrams.
+                    System.err.println("RM" + replicaId + ": ignoring malformed packet");
                 }
             }
         } catch (Exception e) {
@@ -1156,6 +1161,10 @@ public class ReplicaManager {
 
     private void handleVote(UDPMessage msg, DatagramSocket socket) {
         // Collect and tally votes
+        // Validate field count before getField(...):
+        // - VOTE_BYZANTINE needs targetId + voterId (2 fields)
+        // - VOTE_CRASH needs targetId + decision + voterId (3 fields)
+        // Ignore malformed votes so one bad packet cannot stop RM behavior.
         // If majority agrees: perform replacement + state transfer
     }
 

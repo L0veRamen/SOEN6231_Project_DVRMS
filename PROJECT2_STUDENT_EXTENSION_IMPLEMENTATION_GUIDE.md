@@ -98,7 +98,8 @@ case INIT_STATE:
     mtl.loadStateSnapshot(snapshots[0]);
     wpg.loadStateSnapshot(snapshots[1]);
     bnf.loadStateSnapshot(snapshots[2]);
-    // ACK includes lastSeqNum (not nextExpectedSeq) for Sequencer replay baseline
+    // ACK includes lastSeqNum (not nextExpectedSeq) for Sequencer replay baseline.
+    // Do not send nextExpectedSeq directly; Sequencer replays from lastSeqNum + 1.
     int lastSeqNum = mtl.getNextExpectedSeq() - 1;
     String initAck = "ACK:INIT_STATE:" + replicaId + ":" + lastSeqNum;
     byte[] initAckData = initAck.getBytes(StandardCharsets.UTF_8);
@@ -286,6 +287,9 @@ private static final long VOTE_WINDOW_MS = 2000; // evaluate reachable votes wit
 private void handleVote(UDPMessage msg, DatagramSocket socket) {
     // VOTE_BYZANTINE:<targetId>:<voterId>
     // VOTE_CRASH:<targetId>:<decision>:<voterId>
+    if (msg.fieldCount() < 2) {
+        return; // malformed vote packet
+    }
     String voteType = msg.getType().name();
     String targetId = msg.getField(0);
     String voteKey = voteType + ":" + targetId;
@@ -293,6 +297,9 @@ private void handleVote(UDPMessage msg, DatagramSocket socket) {
     String voterDecision;
     String voterId;
     if (msg.getType() == UDPMessage.Type.VOTE_CRASH) {
+        if (msg.fieldCount() < 3) {
+            return; // malformed vote packet
+        }
         voterDecision = msg.getField(1);  // ALIVE or CRASH_CONFIRMED
         voterId = msg.getField(2);         // sender RM id
     } else {
@@ -486,7 +493,7 @@ private String requestStateFromHealthyReplica() {
 
 - [ ] Steps summary:
   1. Monitor co-located replica health via `heartbeatLoop()` (3s interval, 2s timeout).
-  2. Listen on RM port (7001–7004) for FE notifications and RM votes.
+  2. Listen on RM port (7001–7004) for FE notifications and RM votes. Keep per-packet parse/dispatch in `try/catch` so malformed UDP packets are logged and ignored.
   3. On `CRASH_SUSPECT`: verify by heartbeating the suspected replica, broadcast `VOTE_CRASH` to all RMs.
   4. On `REPLACE_REQUEST`: broadcast `VOTE_BYZANTINE` to all RMs.
   5. `handleVote()`: collect votes, require strict majority of reachable RMs.
@@ -765,7 +772,7 @@ private void enableByzantine(int replicaId, boolean enable) {
 - `REPLICA_READY` message format: `REPLICA_READY:replicaID:host:port:lastSeqNum` — includes lastSeqNum so Sequencer can replay from the correct point.
 - `VOTE_BYZANTINE` message format: `VOTE_BYZANTINE:targetId:voterId` — targetId is the faulty replica, voterId is the sending RM.
 - `VOTE_CRASH` message format: `VOTE_CRASH:suspectedId:verdict:voterId` — suspectedId first, then verdict (ALIVE or CRASH_CONFIRMED), then voter RM id.
-- `INIT_STATE` ACK format: `ACK:INIT_STATE:replicaId:lastSeqNum` — `lastSeqNum` means highest sequence already applied (`nextExpectedSeq - 1`).
+- `INIT_STATE` ACK format: `ACK:INIT_STATE:replicaId:lastSeqNum` — `lastSeqNum` means highest sequence already applied (`nextExpectedSeq - 1`). Do not send `nextExpectedSeq` directly.
 - Sequencer replay rule: on `REPLICA_READY`, replay starts from `lastSeqNum + 1` for that recovered replica only.
 - `handleVote()` decision rule: strict majority of reachable votes collected within a bounded vote timeout window.
 - Phase 1 already provides: RESULT with reqID, CompletableFuture voting, sendResultToFE(), targeted NACK replay, per-thread sockets. Verify these are present before extending.

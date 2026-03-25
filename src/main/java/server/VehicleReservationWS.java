@@ -1646,8 +1646,10 @@ public class VehicleReservationWS {
             : serverID;
     if (byzantineMode) {
       nextExpectedSeq++;
-      return "RESULT:" + seqNum + ":" + reqID + ":" + resultReplicaId
+      String resultMsg = "RESULT:" + seqNum + ":" + reqID + ":" + resultReplicaId
           + ":BYZANTINE_RANDOM_" + System.nanoTime();
+      sendResultToFE(feHost, fePort, resultMsg);
+      return resultMsg;
     }
     String result = handleUDPRequest(operation);
     nextExpectedSeq++;

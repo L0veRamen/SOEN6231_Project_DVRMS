@@ -16,6 +16,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -56,6 +57,19 @@ class ReplicaManagerBehaviorTest {
 
         assertTrue(rm.replacementTriggered.await(1000, TimeUnit.MILLISECONDS));
         assertTrue(rm.replaced.get());
+    }
+
+    @Test
+    void malformedVotes_areIgnoredWithoutTriggeringReplacement() throws Exception {
+        VoteTestReplicaManager rm = new VoteTestReplicaManager(2);
+
+        // Missing voter ID
+        rm.acceptVote(new UDPMessage(UDPMessage.Type.VOTE_BYZANTINE, "2"));
+        // Missing voter ID for VOTE_CRASH (needs: targetId, decision, voterId)
+        rm.acceptVote(new UDPMessage(UDPMessage.Type.VOTE_CRASH, "2", "CRASH_CONFIRMED"));
+
+        assertFalse(rm.replacementTriggered.await(250, TimeUnit.MILLISECONDS));
+        assertFalse(rm.replaced.get());
     }
 
     @Test
