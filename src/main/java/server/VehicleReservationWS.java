@@ -58,6 +58,7 @@ public class VehicleReservationWS {
   private static final String MSG_NO_RESERVATION =
       "FAIL: No reservation found for customer %s on vehicle %s";
   private final String serverID; // MTL, WPG, or BNF
+  private final String replicaIDForResult; // Numeric replica ID (1..4) for P2 RESULT messages
   // ==================== Data Structures ====================
   // Per-instance data (each server has its own)
   private final ConcurrentHashMap<String, Vehicle> vehicleDB;
@@ -75,13 +76,18 @@ public class VehicleReservationWS {
   private volatile boolean byzantineMode = false;
   /** No-arg constructor required by JAX-WS tooling (e.g., wsgen). */
   public VehicleReservationWS() {
-    this(TOOLING_DEFAULT_SERVER_ID, TOOLING_DEFAULT_UDP_PORT, false);
+    this(TOOLING_DEFAULT_SERVER_ID, TOOLING_DEFAULT_UDP_PORT, false, null);
   }
   public VehicleReservationWS(String serverID, int udpPort) {
-    this(serverID, udpPort, true);
+    this(serverID, udpPort, true, null);
   }
-  private VehicleReservationWS(String serverID, int udpPort, boolean bootstrapRuntime) {
+  public VehicleReservationWS(String serverID, int udpPort, String replicaIDForResult) {
+    this(serverID, udpPort, true, replicaIDForResult);
+  }
+  private VehicleReservationWS(
+      String serverID, int udpPort, boolean bootstrapRuntime, String replicaIDForResult) {
     this.serverID = serverID;
+    this.replicaIDForResult = replicaIDForResult;
     this.vehicleDB = new ConcurrentHashMap<>();
     this.reservations = new ConcurrentHashMap<>();
     this.waitList = new ConcurrentHashMap<>();
@@ -1634,13 +1640,18 @@ public class VehicleReservationWS {
 
   private String executeAndDeliver(int seqNum, String reqID,
                                     String feHost, int fePort, String operation) {
+    String resultReplicaId =
+        (replicaIDForResult != null && !replicaIDForResult.isEmpty())
+            ? replicaIDForResult
+            : serverID;
     if (byzantineMode) {
       nextExpectedSeq++;
-      return "RESULT:" + seqNum + ":" + reqID + ":" + serverID + ":BYZANTINE_RANDOM_" + System.nanoTime();
+      return "RESULT:" + seqNum + ":" + reqID + ":" + resultReplicaId
+          + ":BYZANTINE_RANDOM_" + System.nanoTime();
     }
     String result = handleUDPRequest(operation);
     nextExpectedSeq++;
-    String resultMsg = "RESULT:" + seqNum + ":" + reqID + ":" + serverID + ":" + result;
+    String resultMsg = "RESULT:" + seqNum + ":" + reqID + ":" + resultReplicaId + ":" + result;
     sendResultToFE(feHost, fePort, resultMsg);
     return resultMsg;
   }

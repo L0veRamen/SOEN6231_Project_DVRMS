@@ -64,9 +64,13 @@ public class ReplicaManager {
      */
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, String>> voteCollector =
         new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> voteWindowStart = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap.KeySetView<String, Boolean> scheduledVoteEvaluation =
+        ConcurrentHashMap.newKeySet();
 
     private static final int HEARTBEAT_INTERVAL_MS = 3000;
     private static final int HEARTBEAT_TIMEOUT_MS = 2000;
+    private static final long VOTE_WINDOW_MS = 2000;
 
     /**
      * Creates a Replica Manager for the given replica ID.
@@ -94,7 +98,7 @@ public class ReplicaManager {
      * Spawns the co-located replica as a subprocess via {@link ProcessBuilder}.
      * The replica runs {@code server.ReplicaLauncher} with the same classpath.
      */
-    private void launchReplica() {
+    protected void launchReplica() {
         try {
             replicaProcess = new ProcessBuilder(
                 "java", "-cp", System.getProperty("java.class.path"),
@@ -109,7 +113,7 @@ public class ReplicaManager {
     /**
      * Forcibly terminates the co-located replica process if it is still alive.
      */
-    private void killReplica() {
+    protected void killReplica() {
         if (replicaProcess != null && replicaProcess.isAlive()) {
             replicaProcess.destroyForcibly();
             System.out.println("RM" + replicaId + ": Replica killed");
@@ -153,7 +157,7 @@ public class ReplicaManager {
      * @param targetPort the UDP port of the replica to check
      * @return {@code true} if the replica responded within the timeout
      */
-    private boolean sendHeartbeatTo(int targetPort) {
+    protected boolean sendHeartbeatTo(int targetPort) {
         try (DatagramSocket socket = new DatagramSocket()) {
             socket.setSoTimeout(HEARTBEAT_TIMEOUT_MS);
             String msg = "HEARTBEAT_CHECK:" + replicaId;
@@ -193,6 +197,7 @@ public class ReplicaManager {
                 socket.receive(packet);
                 String raw = new String(packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8);
                 UDPMessage msg = UDPMessage.parse(raw);
+                maybeAckFaultNotification(msg, socket, packet);
 
                 switch (msg.getType()) {
                     case REPLACE_REQUEST:
@@ -217,6 +222,38 @@ public class ReplicaManager {
         }
     }
 
+    protected void maybeAckFaultNotification(
+        UDPMessage msg, DatagramSocket socket, DatagramPacket sourcePacket) {
+        UDPMessage.Type type = msg.getType();
+        if (type != UDPMessage.Type.INCORRECT_RESULT
+            && type != UDPMessage.Type.CRASH_SUSPECT
+            && type != UDPMessage.Type.REPLACE_REQUEST) {
+            return;
+        }
+
+        try {
+            String ack = "ACK:" + type.name();
+            byte[] ackData = ack.getBytes(StandardCharsets.UTF_8);
+            socket.send(new DatagramPacket(
+                ackData, ackData.length, sourcePacket.getAddress(), sourcePacket.getPort()));
+        } catch (Exception e) {
+            System.err.println("RM" + replicaId + ": ACK send error: " + e.getMessage());
+        }
+    }
+
+    private String normalizeReplicaId(String replicaIdToken) {
+        if (replicaIdToken == null) {
+            return null;
+        }
+        String trimmed = replicaIdToken.trim();
+        if (trimmed.length() >= 2
+            && (trimmed.charAt(0) == 'R' || trimmed.charAt(0) == 'r')
+            && Character.isDigit(trimmed.charAt(1))) {
+            return trimmed.substring(1);
+        }
+        return trimmed;
+    }
+
     /**
      * Handles a {@code REPLACE_REQUEST} from the FE (Byzantine fault threshold reached).
      * Broadcasts a {@code VOTE_BYZANTINE} message to all RMs to initiate consensus.
@@ -226,8 +263,8 @@ public class ReplicaManager {
      * @param msg    the parsed REPLACE_REQUEST message
      * @param socket the RM's listener socket used for sending votes
      */
-    private void handleByzantineReplace(UDPMessage msg, DatagramSocket socket) {
-        String faultyReplicaId = msg.getField(0);
+    protected void handleByzantineReplace(UDPMessage msg, DatagramSocket socket) {
+        String faultyReplicaId = normalizeReplicaId(msg.getField(0));
         System.out.println("RM" + replicaId + ": Byzantine replace requested for " + faultyReplicaId);
 
         // Broadcast VOTE_BYZANTINE to all RMs (including self) for consensus
@@ -253,10 +290,24 @@ public class ReplicaManager {
      * @param msg    the parsed CRASH_SUSPECT message
      * @param socket the RM's listener socket used for sending votes
      */
-    private void handleCrashSuspect(UDPMessage msg, DatagramSocket socket) {
-        String suspectedId = msg.getField(2); // field(2) = suspectedReplicaId
+    protected void handleCrashSuspect(UDPMessage msg, DatagramSocket socket) {
+        String suspectedId = normalizeReplicaId(msg.getField(2)); // field(2) = suspectedReplicaId
+        if (suspectedId == null || suspectedId.isEmpty()) {
+            return;
+        }
         // Heartbeat the suspected replica's port, not our own
-        int suspectedPort = PortConfig.ALL_REPLICAS[Integer.parseInt(suspectedId) - 1];
+        int suspectedIndex;
+        try {
+            suspectedIndex = Integer.parseInt(suspectedId) - 1;
+        } catch (NumberFormatException e) {
+            System.err.println("RM" + replicaId + ": invalid suspected replica ID " + suspectedId);
+            return;
+        }
+        if (suspectedIndex < 0 || suspectedIndex >= PortConfig.ALL_REPLICAS.length) {
+            System.err.println("RM" + replicaId + ": out-of-range suspected replica ID " + suspectedId);
+            return;
+        }
+        int suspectedPort = PortConfig.ALL_REPLICAS[suspectedIndex];
         boolean alive = sendHeartbeatTo(suspectedPort);
         String vote = alive
             ? "VOTE_CRASH:" + suspectedId + ":ALIVE:" + replicaId
@@ -283,16 +334,20 @@ public class ReplicaManager {
      *   <li>{@code VOTE_CRASH:<targetId>:<ALIVE|CRASH_CONFIRMED>:<voterId>}</li>
      * </ul>
      *
-     * <p>Majority rule: requires at least {@code ALL_RMS.length / 2 + 1} votes before deciding,
-     * then {@code agreeCount > totalVotes / 2}. Supports 3/4 or 2/3 (if one RM is down).
-     * Only the RM responsible for the target replica performs replacement.
+     * <p>Majority rule: evaluate votes after a bounded vote window and require
+     * {@code agreeCount > totalVotes / 2} where {@code totalVotes} are the votes
+     * received in that window (reachable RMs). Only the RM responsible for the
+     * target replica performs replacement.
      *
      * @param msg    the parsed vote message
      * @param socket the RM's listener socket (unused but kept for handler signature)
      */
-    private void handleVote(UDPMessage msg, DatagramSocket socket) {
+    protected void handleVote(UDPMessage msg, DatagramSocket socket) {
         String voteType = msg.getType().name();
-        String targetId = msg.getField(0);
+        String targetId = normalizeReplicaId(msg.getField(0));
+        if (targetId == null || targetId.isEmpty()) {
+            return;
+        }
         String voteKey = voteType + ":" + targetId;
 
         // Vote format: VOTE_BYZANTINE:<targetId>:<voterId>
@@ -310,27 +365,51 @@ public class ReplicaManager {
         // Record this vote keyed by the sender's RM identity
         voteCollector.computeIfAbsent(voteKey, k -> new ConcurrentHashMap<>())
             .put("RM" + voterId, voterDecision);
+        voteWindowStart.putIfAbsent(voteKey, System.currentTimeMillis());
 
-        // Check majority — need minimum votes before deciding
-        ConcurrentHashMap<String, String> votes = voteCollector.get(voteKey);
-        if (votes != null) {
-            int totalVotes = votes.size();
-            int minVotes = PortConfig.ALL_RMS.length / 2 + 1;
-            if (totalVotes < minVotes) return;
-
-            long agreeCount = votes.values().stream()
-                .filter(v -> v.equals("AGREE") || v.equals("CRASH_CONFIRMED")).count();
-
-            if (agreeCount > totalVotes / 2) {
-                // Only the RM responsible for the targetId should perform replacement
-                if (targetId.equals(String.valueOf(replicaId))) {
-                    replaceReplica();
+        if (scheduledVoteEvaluation.add(voteKey)) {
+            Thread evaluator = new Thread(() -> {
+                try {
+                    Thread.sleep(voteWindowMs());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    evaluateVoteWindow(voteKey);
+                    scheduledVoteEvaluation.remove(voteKey);
                 }
-                voteCollector.remove(voteKey);
-            } else if (totalVotes >= PortConfig.ALL_RMS.length) {
-                // All RMs voted but no majority — clean up to prevent leak
-                voteCollector.remove(voteKey);
-            }
+            }, "RM" + replicaId + "-VoteWindow-" + voteKey);
+            evaluator.setDaemon(true);
+            evaluator.start();
+        }
+    }
+
+    protected long voteWindowMs() {
+        return VOTE_WINDOW_MS;
+    }
+
+    protected void evaluateVoteWindow(String voteKey) {
+        ConcurrentHashMap<String, String> votes = voteCollector.remove(voteKey);
+        voteWindowStart.remove(voteKey);
+        if (votes == null || votes.isEmpty()) {
+            return;
+        }
+
+        int totalVotes = votes.size();
+        long agreeCount = votes.values().stream()
+            .filter(v -> v.equals("AGREE") || v.equals("CRASH_CONFIRMED"))
+            .count();
+
+        if (agreeCount <= totalVotes / 2) {
+            return;
+        }
+
+        int splitAt = voteKey.indexOf(':');
+        if (splitAt < 0 || splitAt == voteKey.length() - 1) {
+            return;
+        }
+        String targetId = voteKey.substring(splitAt + 1);
+        if (targetId.equals(String.valueOf(replicaId))) {
+            replaceReplica();
         }
     }
 
@@ -345,7 +424,7 @@ public class ReplicaManager {
      * @param socket the RM's listener socket used to send the response
      * @param from   the original packet (source address of the requesting RM)
      */
-    private void handleStateRequest(UDPMessage msg, DatagramSocket socket, DatagramPacket from) {
+    protected void handleStateRequest(UDPMessage msg, DatagramSocket socket, DatagramPacket from) {
         try (DatagramSocket reqSocket = new DatagramSocket()) {
             // Forward STATE_REQUEST to the co-located replica
             String stateReq = "STATE_REQUEST:" + replicaId;
@@ -386,7 +465,7 @@ public class ReplicaManager {
      *
      * <p>REPLICA_READY format: {@code REPLICA_READY:<replicaId>:localhost:<port>:<lastSeqNum>}
      */
-    private void replaceReplica() {
+    protected void replaceReplica() {
         System.out.println("RM" + replicaId + ": Starting replica replacement");
 
         // Step 1–2: Kill faulty replica and launch fresh one
@@ -399,33 +478,46 @@ public class ReplicaManager {
 
         // Step 4: Transfer state to the new replica
         if (snapshot != null) {
-            try (DatagramSocket socket = new DatagramSocket()) {
-                String initMsg = "INIT_STATE:" + snapshot;
-                byte[] data = initMsg.getBytes(StandardCharsets.UTF_8);
-                socket.send(new DatagramPacket(data, data.length,
-                    InetAddress.getByName("localhost"), replicaPort));
-
-                // Wait for ACK — format: ACK:INIT_STATE:<replicaId>:<lastSeqNum>
-                socket.setSoTimeout(5000);
-                byte[] buf = new byte[8192];
-                DatagramPacket ack = new DatagramPacket(buf, buf.length);
-                socket.receive(ack);
-                String ackStr = new String(ack.getData(), 0, ack.getLength(),
-                    StandardCharsets.UTF_8);
-                String[] ackParts = ackStr.split(":");
-                if (ackParts.length >= 4) {
-                    lastSeqNum = Integer.parseInt(ackParts[3]);
-                }
-                System.out.println("RM" + replicaId + ": State transfer complete, lastSeq=" + lastSeqNum);
-            } catch (Exception e) {
-                System.err.println("RM" + replicaId + ": State transfer failed: " + e.getMessage());
-            }
+            lastSeqNum = initializeReplicaState(snapshot);
         }
 
         // Step 5: Notify Sequencer, FE, and all RMs that the replica is ready
+        notifyReplicaReady(lastSeqNum);
+    }
+
+    protected int initializeReplicaState(String snapshot) {
         try (DatagramSocket socket = new DatagramSocket()) {
-            String readyMsg = "REPLICA_READY:" + replicaId + ":localhost:" + replicaPort
-                + ":" + lastSeqNum;
+            String initMsg = "INIT_STATE:" + snapshot;
+            byte[] data = initMsg.getBytes(StandardCharsets.UTF_8);
+            socket.send(new DatagramPacket(data, data.length,
+                InetAddress.getByName("localhost"), replicaPort));
+
+            // Wait for ACK — format: ACK:INIT_STATE:<replicaId>:<lastSeqNum>
+            socket.setSoTimeout(5000);
+            byte[] buf = new byte[8192];
+            DatagramPacket ack = new DatagramPacket(buf, buf.length);
+            socket.receive(ack);
+            String ackStr = new String(ack.getData(), 0, ack.getLength(), StandardCharsets.UTF_8);
+            String[] ackParts = ackStr.split(":");
+            int lastSeqNum = -1;
+            if (ackParts.length >= 4) {
+                lastSeqNum = Integer.parseInt(ackParts[3]);
+            }
+            System.out.println("RM" + replicaId + ": State transfer complete, lastSeq=" + lastSeqNum);
+            return lastSeqNum;
+        } catch (Exception e) {
+            System.err.println("RM" + replicaId + ": State transfer failed: " + e.getMessage());
+            return -1;
+        }
+    }
+
+    protected String buildReplicaReadyMessage(int lastSeqNum) {
+        return "REPLICA_READY:" + replicaId + ":localhost:" + replicaPort + ":" + lastSeqNum;
+    }
+
+    protected void notifyReplicaReady(int lastSeqNum) {
+        try (DatagramSocket socket = new DatagramSocket()) {
+            String readyMsg = buildReplicaReadyMessage(lastSeqNum);
             byte[] readyData = readyMsg.getBytes(StandardCharsets.UTF_8);
             InetAddress localhost = InetAddress.getByName("localhost");
             socket.send(new DatagramPacket(readyData, readyData.length,
@@ -451,7 +543,7 @@ public class ReplicaManager {
      * @return the snapshot string (format: {@code mtlSnap|wpgSnap|bnfSnap}),
      *         or {@code null} if no healthy RM responded
      */
-    private String requestStateFromHealthyReplica() {
+    protected String requestStateFromHealthyReplica() {
         for (int i = 0; i < PortConfig.ALL_RMS.length; i++) {
             int targetRmPort = PortConfig.ALL_RMS[i];
             if (targetRmPort == rmPort) continue; // skip self

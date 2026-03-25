@@ -198,7 +198,7 @@ public class FrontEnd {
         }
         // Report crash for non-responding replicas
         for (int i = 0; i < PortConfig.ALL_REPLICAS.length; i++) {
-            String rid = "R" + (i + 1);
+            String rid = String.valueOf(i + 1);
             if (!ctx.replicaResults.containsKey(rid)) {
                 sendToAllRMs("CRASH_SUSPECT:" + ctx.requestID + ":" + ctx.seqNum + ":" + rid);
             }

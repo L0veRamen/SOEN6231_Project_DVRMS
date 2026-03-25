@@ -3,6 +3,7 @@
 ## Purpose
 This guide is for Phase 2 only.
 Use it after the shared Phase 1 baseline in `PROJECT2_GROUP_IMPLEMENTATION_GUIDE.md` is complete and approved.
+If wording differs, follow `FT-DVRMS_Project2_Design_v3.3_ALIGNMENT_ADDENDUM.md`.
 
 ## Entry Condition
 - [ ] Group Readiness Checklist in `PROJECT2_GROUP_IMPLEMENTATION_GUIDE.md` is complete.
@@ -24,7 +25,7 @@ Use it after the shared Phase 1 baseline in `PROJECT2_GROUP_IMPLEMENTATION_GUIDE
 - [ ] Done Criteria: all extension tasks follow shared constraints and remain merge-ready
 - [ ] Notes:
 
-### [group] All Students Replica Modifications (v3.2 §3.5)
+### [group] All Students Replica Modifications (v3.3 + addendum §3.5)
 - [ ] Owner: [group]
 - [ ] Goal: keep all replica implementations compatible with active replication requirements
 - [ ] Input/Dependency: shared Phase 1 architecture and UDP message contract
@@ -39,39 +40,21 @@ Use it after the shared Phase 1 baseline in `PROJECT2_GROUP_IMPLEMENTATION_GUIDE
 | SET_BYZANTINE | `byzantineMode` flag, switch case in `handleUDPRequest()` | `VehicleReservationWS.java` (Group Guide Step 5) |
 | Serializable | `WaitlistEntry implements Serializable` | `WaitlistEntry.java` (Group Guide Step 6) |
 
-**Phase 1 `ReplicaLauncher.java` message loop for reference** — only handles EXECUTE:
-```java
-// Current Phase 1 code — ONLY handles EXECUTE
-UDPMessage msg = UDPMessage.parse(raw);
-if (msg.getType() == UDPMessage.Type.EXECUTE) {
-    int seqNum   = Integer.parseInt(msg.getField(0));
-    String reqID = msg.getField(1);
-    String feHost = msg.getField(2);
-    int fePort   = Integer.parseInt(msg.getField(3));
-    StringBuilder op = new StringBuilder(msg.getField(4));
-    for (int i = 5; i < msg.fieldCount(); i++) {
-        op.append(':').append(msg.getField(i));
-    }
-    String officeId = extractTargetOffice(op.toString());
-    VehicleReservationWS target = offices.getOrDefault(officeId, mtl);
-    String result = target.handleExecute(seqNum, reqID, feHost, fePort, op.toString());
-    // ACK back to Sequencer
-    String ack = "ACK:" + seqNum;
-    socket.send(new DatagramPacket(ack.getBytes(StandardCharsets.UTF_8), ...));
-}
-// Phase 2 must add: HEARTBEAT_CHECK, SET_BYZANTINE, STATE_REQUEST, INIT_STATE cases
-```
+**Baseline check for `ReplicaLauncher.java`:**
+- Confirm the message loop handles `EXECUTE`, `HEARTBEAT_CHECK`, `SET_BYZANTINE`, `STATE_REQUEST`, and `INIT_STATE`.
+- If any of these cases are missing in your branch, add only the missing case(s).
 
 **Phase 2 must complete (wire into running system):**
 
 - [ ] Steps (plain language):
-  1. Wire `HEARTBEAT_CHECK` → `HEARTBEAT_ACK` response into `ReplicaLauncher` message loop (not implemented in Phase 1).
-  2. Wire `SET_BYZANTINE` message handling into `ReplicaLauncher` message loop so it reaches `VehicleReservationWS`.
-  3. Wire `STATE_REQUEST` → call `getStateSnapshot()` and reply with `STATE_TRANSFER` message in `ReplicaLauncher`.
-  4. Wire `INIT_STATE` → call `loadStateSnapshot()` and set `nextExpectedSeq` in `ReplicaLauncher`.
+  1. Verify `HEARTBEAT_CHECK` → `HEARTBEAT_ACK` exists in `ReplicaLauncher` message loop; add only if missing.
+  2. Verify `SET_BYZANTINE` handling is wired to `VehicleReservationWS`; add only if missing.
+  3. Verify `STATE_REQUEST` → `STATE_TRANSFER` exists in `ReplicaLauncher`; add only if missing.
+  4. Verify `INIT_STATE` loading + ACK exists in `ReplicaLauncher`; add only if missing.
   5. Route incoming `EXECUTE` to the correct office instance (MTL, WPG, BNF) using the vehicle ID or customer ID in the operation string — follow `extractTargetOffice()` pattern in Group Guide Step 7.
-  6. Keep replica communication on UDP for all server-side flows.
-  7. Preserve A3 business logic (vehicle, reservation, waitlist, budget, cross-office rules).
+  6. Forward `NACK:replicaID:seqStart:seqEnd` returned by `handleExecute()` back to Sequencer.
+  7. Keep replica communication on UDP for all server-side flows.
+  8. Preserve A3 business logic (vehicle, reservation, waitlist, budget, cross-office rules).
 
 **Build steps — add cases to `ReplicaLauncher.java` message loop:**
 
@@ -115,12 +98,25 @@ case INIT_STATE:
     mtl.loadStateSnapshot(snapshots[0]);
     wpg.loadStateSnapshot(snapshots[1]);
     bnf.loadStateSnapshot(snapshots[2]);
-    // ACK includes lastSeqNum so RM can pass it to Sequencer via REPLICA_READY
-    String initAck = "ACK:INIT_STATE:" + replicaId + ":" + mtl.getNextExpectedSeq();
+    // ACK includes lastSeqNum (not nextExpectedSeq) for Sequencer replay baseline
+    int lastSeqNum = mtl.getNextExpectedSeq() - 1;
+    String initAck = "ACK:INIT_STATE:" + replicaId + ":" + lastSeqNum;
     byte[] initAckData = initAck.getBytes(StandardCharsets.UTF_8);
     socket.send(new DatagramPacket(initAckData,
         initAckData.length, packet.getAddress(), packet.getPort()));
     break;
+```
+
+**In the existing `EXECUTE` case**, forward gap reports to Sequencer:
+
+```java
+String executeReply = target.handleExecute(seqNum, reqID, feHost, fePort, op.toString());
+
+if (executeReply != null && executeReply.startsWith("NACK:")) {
+    byte[] nackData = executeReply.getBytes(StandardCharsets.UTF_8);
+    socket.send(new DatagramPacket(nackData, nackData.length,
+        packet.getAddress(), packet.getPort())); // back to Sequencer
+}
 ```
 
 **Office routing reference** — `extractTargetOffice()` routes each operation to the correct office instance within the replica. Different operations place the office-identifying ID at different positions:
@@ -131,7 +127,10 @@ case INIT_STATE:
 | CANCEL | `CANCEL:custID:vehID` | vehID (parts[2]) |
 | WAITLIST | `WAITLIST:custID:vehID:start:end` | vehID (parts[2]) |
 | ATOMIC_UPDATE | `ATOMIC_UPDATE:custID:vehID:start:end` | vehID (parts[2]) |
-| FIND | `FIND:vehicleType` | broadcast to all offices |
+| ADDVEHICLE | `ADDVEHICLE:managerID:...` | managerID (parts[1]) |
+| REMOVEVEHICLE | `REMOVEVEHICLE:managerID:...` | managerID (parts[1]) |
+| LISTAVAILABLE | `LISTAVAILABLE:managerID` | managerID (parts[1]) |
+| FIND | `FIND:vehicleType` | deterministic aggregator office (e.g., MTL) |
 | LISTRES | `LISTRES:custID` | custID (parts[1]) |
 
 ```java
@@ -140,9 +139,14 @@ private static String extractTargetOffice(String operation) {
     String op = parts[0];
     switch (op) {
         case "FIND":
-            return null; // broadcast — caller must query all 3 offices and merge
+            // deterministic aggregator office for merged cross-office find response
+            return "MTL";
         case "LISTRES":
             return ServerIdRules.extractOfficeID(parts[1]); // customerID → office
+        case "ADDVEHICLE":
+        case "REMOVEVEHICLE":
+        case "LISTAVAILABLE":
+            return ServerIdRules.extractOfficeID(parts[1]); // managerID → office
         default:
             // RESERVE, CANCEL, WAITLIST, ATOMIC_UPDATE — vehicleID is at parts[2]
             if (parts.length >= 3) {
@@ -153,16 +157,16 @@ private static String extractTargetOffice(String operation) {
 }
 ```
 
-> **Note:** `FIND` returns `null` because it must query all 3 offices and merge results (same as A3's `findVehicle` which calls each remote office). The `ReplicaLauncher` message loop should handle `null` by calling all 3 offices and concatenating results.
+> **Note:** `FIND` uses a deterministic aggregator office (for example `MTL`) so each `EXECUTE` is processed exactly once while still returning merged cross-office results through existing A3 logic.
 
 - [ ] Done Criteria: each replica variant stays deterministic and compatible with FE, Sequencer, and RM flows
-- [ ] Notes: `UDPServer.java` dedup+ACK requires no further Phase 2 changes.
+- [ ] Notes: `UDPServer.java` dedup+ACK requires no further Phase 2 changes. If RMs are running, do not launch `ReplicaLauncher` manually in the same run.
 
 ---
 
 ## Phase 2 Student Extension Blocks
 
-### [Student 1] Front End Extension (v3.2 §3.1)
+### [Student 1] Front End Extension (v3.3 + addendum §3.1)
 - [ ] Owner: [Student 1]
 - [ ] Goal: complete FE voting and failure-notification behavior for active replication
 - [ ] Input/Dependency: Sequencer request path and replica result messages are available
@@ -228,8 +232,8 @@ private void reportDissenters(RequestContext ctx, String majorityResult) {
     }
 
     // Report crash for non-responding replicas
-    for (int port : PortConfig.ALL_REPLICAS) {
-        String rid = "R" + port;
+    for (int i = 0; i < PortConfig.ALL_REPLICAS.length; i++) {
+        String rid = String.valueOf(i + 1);
         if (!ctx.replicaResults.containsKey(rid)) {
             sendToAllRMs("CRASH_SUSPECT:" + ctx.requestID + ":" + ctx.seqNum + ":" + rid);
         }
@@ -254,7 +258,7 @@ private void updateSlowTime(RequestContext ctx) {
 
 ---
 
-### [Student 2] Replica Manager (RM) Extension (v3.2 §3.2)
+### [Student 2] Replica Manager (RM) Extension (v3.3 + addendum §3.2)
 - [ ] Owner: [Student 2]
 - [ ] Goal: complete RM failure detection, consensus, replacement, and recovery
 - [ ] Input/Dependency: FE notifications and replica heartbeat/state endpoints are available
@@ -276,6 +280,8 @@ Phase 1 stub has no vote tallying. Add a vote collection window:
 // Add field to ReplicaManager:
 private final ConcurrentHashMap<String, ConcurrentHashMap<String, String>> voteCollector =
     new ConcurrentHashMap<>(); // voteKey → (rmId → vote)
+private final ConcurrentHashMap<String, Long> voteWindowStart = new ConcurrentHashMap<>();
+private static final long VOTE_WINDOW_MS = 2000; // evaluate reachable votes within timeout
 
 private void handleVote(UDPMessage msg, DatagramSocket socket) {
     // VOTE_BYZANTINE:<targetId>:<voterId>
@@ -297,27 +303,30 @@ private void handleVote(UDPMessage msg, DatagramSocket socket) {
     // Record this vote keyed by the sender's RM identity
     voteCollector.computeIfAbsent(voteKey, k -> new ConcurrentHashMap<>())
         .put("RM" + voterId, voterDecision);
+    voteWindowStart.putIfAbsent(voteKey, System.currentTimeMillis());
 
-    // Check majority — require minimum votes before deciding (§3.2)
+    // Evaluate only after vote timeout; totalVotes = reachable votes in window
+    Long windowStart = voteWindowStart.get(voteKey);
+    if (windowStart == null || System.currentTimeMillis() - windowStart < VOTE_WINDOW_MS) {
+        return;
+    }
+
     ConcurrentHashMap<String, String> votes = voteCollector.get(voteKey);
     if (votes != null) {
         int totalVotes = votes.size();
-        int minVotes = PortConfig.ALL_RMS.length / 2 + 1; // 3 for 4 RMs
-        if (totalVotes < minVotes) return;
+        if (totalVotes == 0) return;
 
         long agreeCount = votes.values().stream()
             .filter(v -> v.equals("AGREE") || v.equals("CRASH_CONFIRMED")).count();
-        // Strict majority of reachable RMs: 3/4 or 2/3 if one RM is down
+        // Strict majority of reachable RMs in the vote window
         if (agreeCount > totalVotes / 2) {
             // Only the RM responsible for the targetId should perform replacement
             if (targetId.equals(String.valueOf(replicaId))) {
                 replaceReplica();
             }
-            voteCollector.remove(voteKey);
-        } else if (totalVotes >= PortConfig.ALL_RMS.length) {
-            // All RMs voted but no majority — clean up to prevent leak
-            voteCollector.remove(voteKey);
         }
+        voteCollector.remove(voteKey);
+        voteWindowStart.remove(voteKey);
     }
 }
 ```
@@ -486,11 +495,11 @@ private String requestStateFromHealthyReplica() {
   8. Send `REPLICA_READY:replicaID:host:port:lastSeqNum` to Sequencer for replay catch-up.
   9. Broadcast `REPLICA_READY` to FE and other RMs.
 - [ ] Done Criteria: RM can replace faulty/crashed replica and restore consistent replica state
-- [ ] Notes: If a crash kills both replica and its co-located RM, only 3 RMs vote. 2/3 reachable is sufficient majority.
+- [ ] Notes: Vote decision is based on strict majority of reachable votes within the vote timeout window. Example: 2/3 reachable votes is sufficient.
 
 ---
 
-### [Student 3] Sequencer Extension (v3.2 §3.3, §4.1)
+### [Student 3] Sequencer Extension (v3.3 + addendum §3.3, §4.1)
 - [ ] Owner: [Student 3]
 - [ ] Goal: complete total-order and reliable multicast behavior
 - [ ] Input/Dependency: FE request format and replica ACK contract are stable
@@ -618,13 +627,13 @@ switch (msg.getType()) {
 
 ---
 
-### [Student 4] Test Cases and TestClient Extension (v3.2 §3.4, §5.1–5.5)
+### [Student 4] Test Cases and TestClient Extension (v3.3 + addendum §3.4, §5.1–5.5)
 - [ ] Owner: [Student 4]
 - [ ] Goal: provide executable test coverage for normal flow and all required failure scenarios
 - [ ] Input/Dependency: FE, Sequencer, RM, and replicas are runnable in integrated environment
 
 **Builds on Phase 1 scaffolding in `ReplicationIntegrationTest.java`:**
-- `@BeforeAll startSystem()` — starts Sequencer, 4 ReplicaLaunchers, 4 ReplicaManagers, and FE as in-process threads. Publishes FE SOAP endpoint. Waits 3s for startup.
+- `@BeforeAll startSystem()` — starts Sequencer, 4 ReplicaManagers (which launch replicas), and FE as in-process threads. Publishes FE SOAP endpoint. Waits 3s for startup.
 - `@AfterAll stopSystem()` — shuts down all components.
 - 21 test method stubs: `t1_vehicleCrud()` through `t21_fullCrossOfficeFlow()`.
 - `enableByzantine(int replicaId, boolean enable)` — sends `SET_BYZANTINE:true/false` via UDP to replica port.
@@ -662,10 +671,10 @@ static void startSystem() throws Exception {
 ```
 
 **Startup order matters:**
-1. Sequencer first (port 9100) — must be ready before FE sends REQUEST
-2. Replicas (ports 6001–6004) — must be ready before Sequencer sends EXECUTE
-3. RMs (ports 7001–7004) — launch replicas, begin heartbeat monitoring
-4. FE (port 8080 SOAP + port 9000 UDP) — must be last, publishes client endpoint
+1. Sequencer first (port 9100) — must be ready before FE sends REQUEST.
+2. RMs next (ports 7001–7004) — each RM launches and monitors its replica (ports 6001–6004).
+3. FE last (port 8080 SOAP + port 9000 UDP) — publishes client endpoint after backend is ready.
+4. Do **not** launch `ReplicaLauncher` separately when RMs are running.
 
 #### Step 2 — Add crash simulation helper
 
@@ -756,8 +765,9 @@ private void enableByzantine(int replicaId, boolean enable) {
 - `REPLICA_READY` message format: `REPLICA_READY:replicaID:host:port:lastSeqNum` — includes lastSeqNum so Sequencer can replay from the correct point.
 - `VOTE_BYZANTINE` message format: `VOTE_BYZANTINE:targetId:voterId` — targetId is the faulty replica, voterId is the sending RM.
 - `VOTE_CRASH` message format: `VOTE_CRASH:suspectedId:verdict:voterId` — suspectedId first, then verdict (ALIVE or CRASH_CONFIRMED), then voter RM id.
-- `INIT_STATE` ACK format: `ACK:INIT_STATE:replicaId:lastSeqNum` — includes lastSeqNum for RM to pass to Sequencer.
-- `handleVote()` requires minimum `ALL_RMS.length / 2 + 1` votes (= 3 for 4 RMs) before deciding (prevents premature triggers with only 2 votes).
+- `INIT_STATE` ACK format: `ACK:INIT_STATE:replicaId:lastSeqNum` — `lastSeqNum` means highest sequence already applied (`nextExpectedSeq - 1`).
+- Sequencer replay rule: on `REPLICA_READY`, replay starts from `lastSeqNum + 1` for that recovered replica only.
+- `handleVote()` decision rule: strict majority of reachable votes collected within a bounded vote timeout window.
 - Phase 1 already provides: RESULT with reqID, CompletableFuture voting, sendResultToFE(), targeted NACK replay, per-thread sockets. Verify these are present before extending.
 
 ## Guide Self-Check
@@ -767,10 +777,14 @@ private void enableByzantine(int replicaId, boolean enable) {
 - [ ] Each extension block includes code snippets showing what to build
 - [ ] Phase 1 vs. Phase 2 responsibilities are split in the shared replica block
 - [ ] Phase 1 deliverables verified (RESULT format, CompletableFuture voting, sendResultToFE, targeted NACK replay, per-thread sockets)
+- [ ] Canonical numeric `replicaID` (`1..4`) is used consistently in FE/RM/Sequencer message examples
+- [ ] Replica `EXECUTE` path explicitly forwards `NACK` to Sequencer
+- [ ] `extractTargetOffice()` mapping includes manager operations (`ADDVEHICLE`, `REMOVEVEHICLE`, `LISTAVAILABLE`)
+- [ ] RM vote rule is documented as strict majority of reachable votes within vote timeout
 - [ ] Traceability is clear:
-  - [ ] [Student 1] section maps to v3.2 §3.1
-  - [ ] [Student 2] section maps to v3.2 §3.2
-  - [ ] [Student 3] section maps to v3.2 §3.3 and §4.1
-  - [ ] [Student 4] section maps to v3.2 §3.4 and §5.1–5.5
-  - [ ] [group] replica block maps to v3.2 §3.5
+  - [ ] [Student 1] section maps to v3.3 + addendum §3.1
+  - [ ] [Student 2] section maps to v3.3 + addendum §3.2
+  - [ ] [Student 3] section maps to v3.3 + addendum §3.3 and §4.1
+  - [ ] [Student 4] section maps to v3.3 + addendum §3.4 and §5.1–5.5
+  - [ ] [group] replica block maps to v3.3 + addendum §3.5
 - [ ] Language stays short, direct, and non-over-engineered

@@ -8,6 +8,7 @@ After the group base is accepted, each member extends their own feature work.
 1. Complete all Phase 1 items together (top to bottom — shared core first, then each role).
 2. Confirm the Group Readiness Checklist is complete.
 3. Move to Phase 2 for individual feature extension.
+4. Use `FT-DVRMS_Project2_Design_v3.3_ALIGNMENT_ADDENDUM.md` as the contract authority when wording differs.
 
 ## Team Ownership
 | Area | Owner |
@@ -72,7 +73,7 @@ src/test/java/                            ← [Student 4 extends]
 ## Phase 1: Group Base Scope
 
 ### In Scope (Do Now)
-- Build the shared project baseline from the design document (v3.2).
+- Build the shared project baseline from the design document (v3.3) and `FT-DVRMS_Project2_Design_v3.3_ALIGNMENT_ADDENDUM.md`.
 - Keep current Assignment 3 business rules unchanged.
 - Add only the minimum shared structure needed for FE, RM, Sequencer, and replica collaboration.
 - Keep code readable and consistent for everyone before personal extensions.
@@ -90,7 +91,7 @@ src/test/java/                            ← [Student 4 extends]
 
 - [ ] Owner: [group]
 - [ ] Goal: build the common infrastructure that every component depends on
-- [ ] Input/Dependency: current A3 codebase + design document v3.2
+- [ ] Input/Dependency: current A3 codebase + design document v3.3 + `FT-DVRMS_Project2_Design_v3.3_ALIGNMENT_ADDENDUM.md`
 
 #### Step 1 — Create `PortConfig.java` (design doc §2.5)
 
@@ -355,6 +356,7 @@ The existing class has all business logic methods (`reserveVehicleLocal`, `cance
 3. Add `SET_BYZANTINE`, `HEARTBEAT_CHECK`, and `STATE_REQUEST` cases to the `handleUDPRequest()` switch.
 4. Add `getStateSnapshot()` and `loadStateSnapshot()` methods.
 5. Add `getNextExpectedSeq()` accessor (used by `ReplicaLauncher` for HEARTBEAT_ACK and INIT_STATE ACK).
+6. Use canonical protocol replica IDs (`1..4`) in replication messages (`RESULT`, `NACK`, `HEARTBEAT_ACK`).
 
 ```java
 // Add these fields to VehicleReservationWS.java
@@ -363,6 +365,9 @@ The existing class has all business logic methods (`reserveVehicleLocal`, `cance
 private int nextExpectedSeq = 0;
 private final PriorityQueue<PendingExecute> holdbackQueue =
     new PriorityQueue<>(Comparator.comparingInt(p -> p.seqNum));
+
+// Canonical protocol replica ID ("1".."4"), set during replica startup
+private String replicaId;
 
 // Byzantine simulation flag (P2)
 private volatile boolean byzantineMode = false;
@@ -398,7 +403,7 @@ synchronized String handleExecute(int seqNum, String reqID,
         // Out of order — buffer it
         holdbackQueue.add(new PendingExecute(seqNum, reqID, feHost, fePort, operation));
         // Send NACK for missing range
-        return "NACK:" + serverID + ":" + nextExpectedSeq + ":" + (seqNum - 1);
+        return "NACK:" + replicaId + ":" + nextExpectedSeq + ":" + (seqNum - 1);
     }
     // seqNum == nextExpectedSeq — execute in order
     String result = executeAndDeliver(seqNum, reqID, feHost, fePort, operation);
@@ -416,7 +421,10 @@ private String executeAndDeliver(int seqNum, String reqID,
     // If Byzantine mode, return random garbage
     if (byzantineMode) {
         nextExpectedSeq++;
-        return "RESULT:" + seqNum + ":" + serverID + ":BYZANTINE_RANDOM_" + System.nanoTime();
+        String resultMsg = "RESULT:" + seqNum + ":" + reqID + ":" + replicaId
+            + ":BYZANTINE_RANDOM_" + System.nanoTime();
+        sendResultToFE(feHost, fePort, resultMsg);
+        return resultMsg;
     }
 
     // Execute using existing handleUDPRequest (A3 business logic, unchanged)
@@ -424,7 +432,7 @@ private String executeAndDeliver(int seqNum, String reqID,
     nextExpectedSeq++;
 
     // Send RESULT back to FE (includes reqID for FE to match to pending request)
-    String resultMsg = "RESULT:" + seqNum + ":" + reqID + ":" + serverID + ":" + result;
+    String resultMsg = "RESULT:" + seqNum + ":" + reqID + ":" + replicaId + ":" + result;
     sendResultToFE(feHost, fePort, resultMsg);
 
     return resultMsg;
@@ -438,7 +446,7 @@ private void sendResultToFE(String feHost, int fePort, String resultMsg) {
             InetAddress.getByName(feHost), fePort));
         socket.close();
     } catch (Exception e) {
-        System.err.println(serverID + ": Failed to send result to FE: " + e.getMessage());
+        System.err.println("Replica " + replicaId + ": Failed to send result to FE: " + e.getMessage());
     }
 }
 ```
@@ -450,7 +458,7 @@ case "SET_BYZANTINE":
     byzantineMode = parts.length >= 2 && "true".equalsIgnoreCase(parts[1]);
     return "OK:BYZANTINE=" + byzantineMode;
 case "HEARTBEAT_CHECK":
-    return "HEARTBEAT_ACK:" + serverID + ":" + nextExpectedSeq;
+    return "HEARTBEAT_ACK:" + replicaId + ":" + nextExpectedSeq;
 case "STATE_REQUEST":
     return "STATE_TRANSFER:" + getStateSnapshot();
 ```
@@ -595,7 +603,14 @@ public class ReplicaLauncher {
                         String officeId = extractTargetOffice(op.toString());
                         VehicleReservationWS target = offices.getOrDefault(officeId, mtl);
 
-                        target.handleExecute(seqNum, reqID, feHost, fePort, op.toString());
+                        String executeReply = target.handleExecute(seqNum, reqID, feHost, fePort, op.toString());
+
+                        // If gap detected, forward replica NACK to Sequencer for replay
+                        if (executeReply != null && executeReply.startsWith("NACK:")) {
+                            byte[] nackData = executeReply.getBytes(StandardCharsets.UTF_8);
+                            socket.send(new DatagramPacket(nackData, nackData.length,
+                                packet.getAddress(), packet.getPort()));
+                        }
 
                         // Send ACK back to Sequencer
                         String ack = "ACK:" + seqNum;
@@ -641,7 +656,8 @@ public class ReplicaLauncher {
                         mtl.loadStateSnapshot(snapshots[0]);
                         wpg.loadStateSnapshot(snapshots[1]);
                         bnf.loadStateSnapshot(snapshots[2]);
-                        String reply = "ACK:INIT_STATE:" + replicaId + ":" + mtl.getNextExpectedSeq();
+                        int lastSeqNum = mtl.getNextExpectedSeq() - 1;
+                        String reply = "ACK:INIT_STATE:" + replicaId + ":" + lastSeqNum;
                         byte[] replyData = reply.getBytes(StandardCharsets.UTF_8);
                         socket.send(new DatagramPacket(replyData, replyData.length,
                             packet.getAddress(), packet.getPort()));
@@ -664,9 +680,14 @@ public class ReplicaLauncher {
         String op = parts[0];
         switch (op) {
             case "FIND":
-                return null; // broadcast — caller must query all 3 offices and merge
+                // Deterministic aggregator office; this office performs cross-office merge via A3 logic
+                return "MTL";
             case "LISTRES":
                 return ServerIdRules.extractOfficeID(parts[1]); // customerID → office
+            case "ADDVEHICLE":
+            case "REMOVEVEHICLE":
+            case "LISTAVAILABLE":
+                return ServerIdRules.extractOfficeID(parts[1]); // managerID → office
             default:
                 // RESERVE, CANCEL, WAITLIST, ATOMIC_UPDATE — vehicleID at parts[2]
                 if (parts.length >= 3) {
@@ -678,9 +699,15 @@ public class ReplicaLauncher {
 }
 ```
 
+**Recovery sequence semantics (canonical):**
+- `ACK:INIT_STATE:replicaID:lastSeqNum` uses `lastSeqNum = nextExpectedSeq - 1` (highest sequence already applied by the recovered replica).
+- `REPLICA_READY:replicaID:host:port:lastSeqNum` uses that same `lastSeqNum`.
+- Sequencer replay starts from `lastSeqNum + 1` for that recovered replica.
+
 #### Step 8 — Verify build stability
 - Run `mvn -q test` — all existing A3 tests still pass.
 - New files should compile without errors.
+- Runtime topology note: if Replica Managers are running, do **not** launch `ReplicaLauncher` manually; each RM launches its co-located replica.
 
 - [ ] Done Criteria: reliable UDP layer works, message format agreed, ports configured, holdback queue interface defined, replicas receive via UDP instead of SOAP, snapshot interface defined, build passes
 - [ ] Notes: Keep A3 business logic completely unchanged. This step is only about adding the replication infrastructure around it.
@@ -818,9 +845,9 @@ public class FrontEnd {
                     }
                 }
             }
-            // Report crash for non-responding replicas
-            for (int port : PortConfig.ALL_REPLICAS) {
-                String rid = "R" + port;
+            // Report crash for non-responding replicas (replicaID uses 1..4)
+            for (int i = 0; i < PortConfig.ALL_REPLICAS.length; i++) {
+                String rid = String.valueOf(i + 1);
                 if (!ctx.replicaResults.containsKey(rid)) {
                     sendToAllRMs("CRASH_SUSPECT:" + ctx.requestID + ":" + ctx.seqNum + ":" + rid);
                 }
@@ -879,8 +906,8 @@ public class FrontEnd {
 
         // Report crash for non-responding replicas
         // (replicas not in ctx.replicaResults after timeout)
-        for (int port : PortConfig.ALL_REPLICAS) {
-            String rid = "R" + port; // derive replicaID from port
+        for (int i = 0; i < PortConfig.ALL_REPLICAS.length; i++) {
+            String rid = String.valueOf(i + 1); // canonical replicaID = 1..4
             if (!ctx.replicaResults.containsKey(rid)) {
                 sendToAllRMs("CRASH_SUSPECT:" + ctx.requestID + ":" + ctx.seqNum + ":" + rid);
             }
@@ -1400,12 +1427,13 @@ public class Sequencer {
 - [ ] Owner: [Student 4]
 - [ ] Input/Dependency: all components running (FE, Sequencer, 4 replicas, 4 RMs)
 - [ ] Goal: validate the group base works for normal operations and all failure scenarios
+- [ ] Scope note: full `T1–T21` implementation is Student 4 extension ownership; group base only needs scaffold + at least one end-to-end smoke pass (T1 or T2).
 
 #### Code: `ReplicationIntegrationTest.java`
 
 **Build steps:**
 1. Create `src/test/java/integration/ReplicationIntegrationTest.java`.
-2. `@BeforeAll`: start FE, Sequencer, 4 ReplicaLaunchers, 4 ReplicaManagers as separate processes (or in-process threads for speed).
+2. `@BeforeAll`: start FE, Sequencer, and 4 ReplicaManagers (RMs launch replicas). Do not start `ReplicaLauncher` separately in the same run.
 3. `@AfterAll`: shut down all processes.
 4. Each test sends SOAP requests through the FE (reuse existing `ClientRuntimeSupport.connectToOffice()` pattern).
 5. Add helper methods for Byzantine simulation and crash simulation.
@@ -1436,12 +1464,6 @@ public class ReplicationIntegrationTest {
     static void startSystem() throws Exception {
         // Start Sequencer
         new Thread(() -> new Sequencer().start()).start();
-
-        // Start 4 Replicas
-        for (int i = 1; i <= 4; i++) {
-            final int id = i;
-            new Thread(() -> ReplicaLauncher.main(new String[]{String.valueOf(id)})).start();
-        }
 
         // Start 4 RMs
         for (int i = 1; i <= 4; i++) {
@@ -1619,6 +1641,9 @@ public class ReplicationIntegrationTest {
 - [ ] FE sends a REQUEST to Sequencer via UDP and receives ACK back
 - [ ] Sequencer multicasts EXECUTE to all 4 replicas and collects ACKs
 - [ ] Replicas send RESULT back to FE via UDP
+- [ ] FE/RM/Sequencer replication messages use canonical numeric `replicaID` values (`1..4`)
+- [ ] Replica path forwards gap `NACK` from `handleExecute()` back to Sequencer
+- [ ] `extractTargetOffice()` covers manager operations (`ADDVEHICLE`, `REMOVEVEHICLE`, `LISTAVAILABLE`) and deterministic `FIND` routing
 - [ ] At least one normal operation (T1 or T2) passes end-to-end through the full FE → Sequencer → Replica → FE path
 - [ ] RM heartbeat check works for at least one replica
 

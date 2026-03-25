@@ -17,11 +17,15 @@ public class ReplicaLauncher {
     public static void main(String[] args) {
         int replicaId = Integer.parseInt(args[0]);
         int replicaPort = PortConfig.ALL_REPLICAS[replicaId - 1];
+        String replicaIdToken = String.valueOf(replicaId);
 
         // Create the 3 office instances (same as A3, but no SOAP publish)
-        VehicleReservationWS mtl = new VehicleReservationWS("MTL", PortConfig.officePort(replicaId, "MTL"));
-        VehicleReservationWS wpg = new VehicleReservationWS("WPG", PortConfig.officePort(replicaId, "WPG"));
-        VehicleReservationWS bnf = new VehicleReservationWS("BNF", PortConfig.officePort(replicaId, "BNF"));
+        VehicleReservationWS mtl =
+            new VehicleReservationWS("MTL", PortConfig.officePort(replicaId, "MTL"), replicaIdToken);
+        VehicleReservationWS wpg =
+            new VehicleReservationWS("WPG", PortConfig.officePort(replicaId, "WPG"), replicaIdToken);
+        VehicleReservationWS bnf =
+            new VehicleReservationWS("BNF", PortConfig.officePort(replicaId, "BNF"), replicaIdToken);
 
         Map<String, VehicleReservationWS> offices = new HashMap<>();
         offices.put("MTL", mtl);
