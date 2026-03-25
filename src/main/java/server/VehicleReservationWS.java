@@ -40,7 +40,8 @@ public class VehicleReservationWS {
   // UDP Ports
   private static final Map<String, Integer> UDP_PORTS = buildUdpPorts();
   private static final String TOOLING_DEFAULT_SERVER_ID = "MTL";
-  private static final int TOOLING_DEFAULT_UDP_PORT = 5001;
+  private static final int TOOLING_DEFAULT_UDP_PORT =
+      PortConfig.officePort(1, TOOLING_DEFAULT_SERVER_ID);
   // ==================== Message Templates ====================
   private static final String MSG_UNAUTHORIZED_MANAGER =
       "FAIL: Manager %s not authorized for %s server";
@@ -117,9 +118,9 @@ public class VehicleReservationWS {
 
   private static Map<String, Integer> buildUdpPorts() {
     Map<String, Integer> ports = new LinkedHashMap<>();
-    ports.put("MTL", 5001);
-    ports.put("WPG", 5002);
-    ports.put("BNF", 5003);
+    ports.put("MTL", PortConfig.officePort(1, "MTL"));
+    ports.put("WPG", PortConfig.officePort(1, "WPG"));
+    ports.put("BNF", PortConfig.officePort(1, "BNF"));
     return Collections.unmodifiableMap(ports);
   }
 
@@ -995,6 +996,23 @@ public class VehicleReservationWS {
     }
     String operation = parts[0];
     switch (operation) {
+      case "ADDVEHICLE":
+        if (parts.length < 6) {
+          return "FAIL: Invalid add vehicle request";
+        }
+        try {
+          return addVehicle(parts[1], parts[2], parts[3], parts[4], Double.parseDouble(parts[5]));
+        } catch (NumberFormatException e) {
+          return "FAIL: Invalid reservation price";
+        }
+      case "REMOVEVEHICLE":
+        return (parts.length >= 3)
+            ? removeVehicle(parts[1], parts[2])
+            : "FAIL: Invalid remove vehicle request";
+      case "LISTAVAILABLE":
+        return (parts.length >= 2)
+            ? listAvailableVehicle(parts[1])
+            : "FAIL: Invalid list available request";
       case "RESERVE":
         return (parts.length >= 5)
             ? reserveVehicleLocal(parts[1], parts[2], parts[3], parts[4], false)
@@ -1458,6 +1476,18 @@ public class VehicleReservationWS {
 
   int getNextExpectedSeq() {
     return nextExpectedSeq;
+  }
+
+  synchronized void syncNextExpectedSeq(int nextExpectedSeq) {
+    this.nextExpectedSeq = nextExpectedSeq;
+    holdbackQueue.clear();
+  }
+
+  synchronized String executeCommittedSequence(
+      int seqNum, String reqID, String feHost, int fePort, String operation) {
+    this.nextExpectedSeq = seqNum;
+    holdbackQueue.clear();
+    return executeAndDeliver(seqNum, reqID, feHost, fePort, operation);
   }
 
   void resetLocalStateForTests() {

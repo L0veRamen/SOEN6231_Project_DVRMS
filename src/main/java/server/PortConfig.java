@@ -38,4 +38,18 @@ public final class PortConfig {
 
     // Sequencer
     public static final int SEQUENCER = 9100;
+
+    // A3 standalone SOAP endpoints (shared baseline defaults)
+    public static final int SOAP_MTL = 8081;
+    public static final int SOAP_WPG = 8082;
+    public static final int SOAP_BNF = 8083;
+
+    public static int officeSoapPort(String office) {
+        switch (office) {
+            case "MTL": return SOAP_MTL;
+            case "WPG": return SOAP_WPG;
+            case "BNF": return SOAP_BNF;
+            default: throw new IllegalArgumentException("Unknown office: " + office);
+        }
+    }
 }

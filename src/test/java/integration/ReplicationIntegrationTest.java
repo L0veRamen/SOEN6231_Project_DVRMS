@@ -15,6 +15,9 @@ import static org.junit.jupiter.api.Assertions.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 public class ReplicationIntegrationTest {
 
+    private static FrontEnd frontEnd;
+    private static javax.xml.ws.Endpoint frontEndEndpoint;
+
     @BeforeAll
     static void startSystem() throws Exception {
         // Start Sequencer
@@ -33,22 +36,42 @@ public class ReplicationIntegrationTest {
         }
 
         // Start FE (SOAP endpoint)
-        FrontEnd fe = new FrontEnd();
-        javax.xml.ws.Endpoint.publish("http://localhost:" + PortConfig.FE_SOAP + "/fe", fe);
+        frontEnd = new FrontEnd();
+        frontEndEndpoint =
+            javax.xml.ws.Endpoint.publish(
+                "http://localhost:" + PortConfig.FE_SOAP + "/fe", frontEnd);
 
-        Thread.sleep(3000); // wait for startup
+        Thread.sleep(5000); // wait for startup
     }
 
     @AfterAll
     static void stopSystem() {
-        // Shutdown all components
+        if (frontEndEndpoint != null) {
+            frontEndEndpoint.stop();
+        }
     }
 
     // ===== T1–T5: Normal operation =====
 
     @Test @Order(1)
     void t1_vehicleCrud() {
-        // TODO: Add, list, remove vehicle through FE
+        String vehicleId = "MTL9099";
+
+        String addResponse =
+            frontEnd.addVehicle("MTLM1111", "QC-NEW-9099", "Sedan", vehicleId, 99.0);
+        assertTrue(
+            addResponse.startsWith("SUCCESS: Vehicle " + vehicleId),
+            "Add vehicle failed: " + addResponse);
+
+        String listResponse = frontEnd.listAvailableVehicle("MTLM1111");
+        assertTrue(
+            listResponse.contains(vehicleId),
+            "List available did not include " + vehicleId + ": " + listResponse);
+
+        String removeResponse = frontEnd.removeVehicle("MTLM1111", vehicleId);
+        assertTrue(
+            removeResponse.startsWith("SUCCESS: Vehicle " + vehicleId + " removed."),
+            "Remove vehicle failed: " + removeResponse);
     }
 
     @Test @Order(2)

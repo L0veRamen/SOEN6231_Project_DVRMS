@@ -15,9 +15,16 @@ public final class ServerPublisher {
   public static void main(String[] args) {
     List<Endpoint> endpoints = new ArrayList<Endpoint>();
     try {
-      endpoints.add(publishOffice("MTL", 8081, 5001));
-      endpoints.add(publishOffice("WPG", 8082, 5002));
-      endpoints.add(publishOffice("BNF", 8083, 5003));
+      int mtlSoap = PortConfig.officeSoapPort("MTL");
+      int wpgSoap = PortConfig.officeSoapPort("WPG");
+      int bnfSoap = PortConfig.officeSoapPort("BNF");
+      int mtlUdp = PortConfig.officePort(1, "MTL");
+      int wpgUdp = PortConfig.officePort(1, "WPG");
+      int bnfUdp = PortConfig.officePort(1, "BNF");
+
+      endpoints.add(publishOffice("MTL", mtlSoap, mtlUdp));
+      endpoints.add(publishOffice("WPG", wpgSoap, wpgUdp));
+      endpoints.add(publishOffice("BNF", bnfSoap, bnfUdp));
 
       Runtime.getRuntime()
           .addShutdownHook(
@@ -35,9 +42,9 @@ public final class ServerPublisher {
                   }));
 
       System.out.println("\n=== All JAX-WS servers are running ===");
-      System.out.println("MTL: http://localhost:8081/mtl?wsdl  + UDP(5001)");
-      System.out.println("WPG: http://localhost:8082/wpg?wsdl  + UDP(5002)");
-      System.out.println("BNF: http://localhost:8083/bnf?wsdl  + UDP(5003)");
+      System.out.println("MTL: http://localhost:" + mtlSoap + "/mtl?wsdl  + UDP(" + mtlUdp + ")");
+      System.out.println("WPG: http://localhost:" + wpgSoap + "/wpg?wsdl  + UDP(" + wpgUdp + ")");
+      System.out.println("BNF: http://localhost:" + bnfSoap + "/bnf?wsdl  + UDP(" + bnfUdp + ")");
       System.out.println("Press Ctrl+C to stop.\n");
 
       KEEP_ALIVE.await();
