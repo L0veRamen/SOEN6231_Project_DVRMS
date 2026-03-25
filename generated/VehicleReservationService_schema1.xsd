@@ -1,0 +1,192 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xs:schema version="1.0" targetNamespace="http://server/" xmlns:tns="http://server/" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+
+  <xs:element name="addToWaitList" type="tns:addToWaitList"/>
+
+  <xs:element name="addToWaitListResponse" type="tns:addToWaitListResponse"/>
+
+  <xs:element name="addVehicle" type="tns:addVehicle"/>
+
+  <xs:element name="addVehicleResponse" type="tns:addVehicleResponse"/>
+
+  <xs:element name="cancelReservation" type="tns:cancelReservation"/>
+
+  <xs:element name="cancelReservationResponse" type="tns:cancelReservationResponse"/>
+
+  <xs:element name="findVehicle" type="tns:findVehicle"/>
+
+  <xs:element name="findVehicleResponse" type="tns:findVehicleResponse"/>
+
+  <xs:element name="getStateSnapshot" type="tns:getStateSnapshot"/>
+
+  <xs:element name="getStateSnapshotResponse" type="tns:getStateSnapshotResponse"/>
+
+  <xs:element name="listAvailableVehicle" type="tns:listAvailableVehicle"/>
+
+  <xs:element name="listAvailableVehicleResponse" type="tns:listAvailableVehicleResponse"/>
+
+  <xs:element name="listCustomerReservations" type="tns:listCustomerReservations"/>
+
+  <xs:element name="listCustomerReservationsResponse" type="tns:listCustomerReservationsResponse"/>
+
+  <xs:element name="loadStateSnapshot" type="tns:loadStateSnapshot"/>
+
+  <xs:element name="loadStateSnapshotResponse" type="tns:loadStateSnapshotResponse"/>
+
+  <xs:element name="removeVehicle" type="tns:removeVehicle"/>
+
+  <xs:element name="removeVehicleResponse" type="tns:removeVehicleResponse"/>
+
+  <xs:element name="reserveVehicle" type="tns:reserveVehicle"/>
+
+  <xs:element name="reserveVehicleResponse" type="tns:reserveVehicleResponse"/>
+
+  <xs:element name="updateReservation" type="tns:updateReservation"/>
+
+  <xs:element name="updateReservationResponse" type="tns:updateReservationResponse"/>
+
+  <xs:complexType name="cancelReservation">
+    <xs:sequence>
+      <xs:element name="customerID" type="xs:string" minOccurs="0"/>
+      <xs:element name="vehicleID" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="cancelReservationResponse">
+    <xs:sequence>
+      <xs:element name="return" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="updateReservation">
+    <xs:sequence>
+      <xs:element name="customerID" type="xs:string" minOccurs="0"/>
+      <xs:element name="vehicleID" type="xs:string" minOccurs="0"/>
+      <xs:element name="newStartDate" type="xs:string" minOccurs="0"/>
+      <xs:element name="newEndDate" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="updateReservationResponse">
+    <xs:sequence>
+      <xs:element name="return" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="findVehicle">
+    <xs:sequence>
+      <xs:element name="customerID" type="xs:string" minOccurs="0"/>
+      <xs:element name="vehicleType" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="findVehicleResponse">
+    <xs:sequence>
+      <xs:element name="return" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="addToWaitList">
+    <xs:sequence>
+      <xs:element name="customerID" type="xs:string" minOccurs="0"/>
+      <xs:element name="vehicleID" type="xs:string" minOccurs="0"/>
+      <xs:element name="startDate" type="xs:string" minOccurs="0"/>
+      <xs:element name="endDate" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="addToWaitListResponse">
+    <xs:sequence>
+      <xs:element name="return" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="listAvailableVehicle">
+    <xs:sequence>
+      <xs:element name="managerID" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="listAvailableVehicleResponse">
+    <xs:sequence>
+      <xs:element name="return" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="listCustomerReservations">
+    <xs:sequence>
+      <xs:element name="customerID" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="listCustomerReservationsResponse">
+    <xs:sequence>
+      <xs:element name="return" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="loadStateSnapshot">
+    <xs:sequence>
+      <xs:element name="arg0" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="loadStateSnapshotResponse">
+    <xs:sequence/>
+  </xs:complexType>
+
+  <xs:complexType name="getStateSnapshot">
+    <xs:sequence/>
+  </xs:complexType>
+
+  <xs:complexType name="getStateSnapshotResponse">
+    <xs:sequence>
+      <xs:element name="return" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="reserveVehicle">
+    <xs:sequence>
+      <xs:element name="customerID" type="xs:string" minOccurs="0"/>
+      <xs:element name="vehicleID" type="xs:string" minOccurs="0"/>
+      <xs:element name="startDate" type="xs:string" minOccurs="0"/>
+      <xs:element name="endDate" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="reserveVehicleResponse">
+    <xs:sequence>
+      <xs:element name="return" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="removeVehicle">
+    <xs:sequence>
+      <xs:element name="managerID" type="xs:string" minOccurs="0"/>
+      <xs:element name="vehicleID" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="removeVehicleResponse">
+    <xs:sequence>
+      <xs:element name="return" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="addVehicle">
+    <xs:sequence>
+      <xs:element name="managerID" type="xs:string" minOccurs="0"/>
+      <xs:element name="vehicleNumber" type="xs:string" minOccurs="0"/>
+      <xs:element name="vehicleType" type="xs:string" minOccurs="0"/>
+      <xs:element name="vehicleID" type="xs:string" minOccurs="0"/>
+      <xs:element name="reservationPrice" type="xs:double"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="addVehicleResponse">
+    <xs:sequence>
+      <xs:element name="return" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+</xs:schema>
+
