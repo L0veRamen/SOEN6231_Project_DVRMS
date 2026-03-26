@@ -75,6 +75,9 @@ public class ReplicaManager {
     private static final int HEARTBEAT_INTERVAL_MS = 3000;
     private static final int HEARTBEAT_TIMEOUT_MS = 2000;
     private static final long VOTE_WINDOW_MS = 2000;
+    private static final int RELIABLE_INIT_TIMEOUT_MS = 500;
+    private static final int RELIABLE_MAX_RETRIES = 5;
+    private final ReliableUDPSender sender = new ReliableUDPSender();
 
     /**
      * Creates a Replica Manager for the given replica ID.
@@ -102,7 +105,7 @@ public class ReplicaManager {
      * Spawns the co-located replica as a subprocess via {@link ProcessBuilder}.
      * The replica runs {@code server.ReplicaLauncher} with the same classpath.
      */
-    protected void launchReplica() {
+    protected synchronized void launchReplica() {
         try {
             replicaProcess = new ProcessBuilder(
                 "java", "-cp", System.getProperty("java.class.path"),
@@ -117,11 +120,22 @@ public class ReplicaManager {
     /**
      * Forcibly terminates the co-located replica process if it is still alive.
      */
-    protected void killReplica() {
+    public synchronized void killReplica() {
         if (replicaProcess != null && replicaProcess.isAlive()) {
+            try (DatagramSocket s = new DatagramSocket()) {
+                String msg = "SHUTDOWN:" + replicaId;
+                byte[] data = msg.getBytes(StandardCharsets.UTF_8);
+                s.send(new DatagramPacket(data, data.length,
+                    InetAddress.getByName("localhost"), replicaPort));
+            } catch (Exception ignored) {}
             replicaProcess.destroyForcibly();
             System.out.println("RM" + replicaId + ": Replica killed");
         }
+    }
+
+    /** Stops this RM: terminates the co-located replica subprocess. */
+    public void stop() {
+        killReplica();
     }
 
     /**
@@ -235,7 +249,11 @@ public class ReplicaManager {
         UDPMessage.Type type = msg.getType();
         if (type != UDPMessage.Type.INCORRECT_RESULT
             && type != UDPMessage.Type.CRASH_SUSPECT
-            && type != UDPMessage.Type.REPLACE_REQUEST) {
+            && type != UDPMessage.Type.REPLACE_REQUEST
+            && type != UDPMessage.Type.VOTE_BYZANTINE
+            && type != UDPMessage.Type.VOTE_CRASH
+            && type != UDPMessage.Type.STATE_REQUEST
+            && type != UDPMessage.Type.REPLICA_READY) {
             return;
         }
 
@@ -246,6 +264,42 @@ public class ReplicaManager {
                 ackData, ackData.length, sourcePacket.getAddress(), sourcePacket.getPort()));
         } catch (Exception e) {
             System.err.println("RM" + replicaId + ": ACK send error: " + e.getMessage());
+        }
+    }
+
+    private void broadcastToPeerRmsReliably(String message, String context) {
+        for (int port : PortConfig.ALL_RMS) {
+            if (port == rmPort) {
+                continue;
+            }
+            final int targetPort = port;
+            Thread voteSender = new Thread(() -> {
+                try (DatagramSocket sendSocket = new DatagramSocket()) {
+                    InetAddress localhost = InetAddress.getByName("localhost");
+                    boolean acked = sender.send(message, localhost, targetPort, sendSocket);
+                    if (!acked) {
+                        System.err.println(
+                            "RM" + replicaId + ": " + context + " not ACKed by RM port " + targetPort);
+                    }
+                } catch (Exception e) {
+                    System.err.println(
+                        "RM" + replicaId + ": " + context + " send error to RM port "
+                            + targetPort + ": " + e.getMessage());
+                }
+            }, "RM" + replicaId + "-" + context + "-to-" + targetPort);
+            voteSender.setDaemon(true);
+            voteSender.start();
+        }
+    }
+
+    private void sendAckToPacket(DatagramSocket socket, DatagramPacket packet, String token) {
+        try {
+            String ack = "ACK:" + token;
+            byte[] ackData = ack.getBytes(StandardCharsets.UTF_8);
+            socket.send(new DatagramPacket(
+                ackData, ackData.length, packet.getAddress(), packet.getPort()));
+        } catch (Exception e) {
+            System.err.println("RM" + replicaId + ": packet ACK send error: " + e.getMessage());
         }
     }
 
@@ -283,15 +337,13 @@ public class ReplicaManager {
 
         // Broadcast VOTE_BYZANTINE to all RMs (including self) for consensus
         String vote = "VOTE_BYZANTINE:" + faultyReplicaId + ":" + replicaId;
-        byte[] data = vote.getBytes(StandardCharsets.UTF_8);
-        for (int port : PortConfig.ALL_RMS) {
-            try {
-                socket.send(new DatagramPacket(data, data.length,
-                    InetAddress.getByName("localhost"), port));
-            } catch (Exception e) {
-                System.err.println("RM" + replicaId + ": vote send error: " + e.getMessage());
-            }
+        try {
+            // Self-vote locally to avoid reliable self-send deadlock on the listener thread.
+            handleVote(UDPMessage.parse(vote), socket);
+        } catch (Exception e) {
+            System.err.println("RM" + replicaId + ": failed to record self Byzantine vote: " + e.getMessage());
         }
+        broadcastToPeerRmsReliably(vote, "VOTE_BYZANTINE");
     }
 
     /**
@@ -329,16 +381,13 @@ public class ReplicaManager {
         String vote = alive
             ? "VOTE_CRASH:" + suspectedId + ":ALIVE:" + replicaId
             : "VOTE_CRASH:" + suspectedId + ":CRASH_CONFIRMED:" + replicaId;
-        // Broadcast verdict to all RMs for tallying
-        byte[] voteData = vote.getBytes(StandardCharsets.UTF_8);
-        for (int rmPort : PortConfig.ALL_RMS) {
-            try {
-                socket.send(new DatagramPacket(voteData, voteData.length,
-                    InetAddress.getByName("localhost"), rmPort));
-            } catch (Exception e) {
-                System.err.println("RM" + replicaId + ": vote send error: " + e.getMessage());
-            }
+        // Broadcast verdict to all peer RMs and record self vote locally.
+        try {
+            handleVote(UDPMessage.parse(vote), socket);
+        } catch (Exception e) {
+            System.err.println("RM" + replicaId + ": failed to record self crash vote: " + e.getMessage());
         }
+        broadcastToPeerRmsReliably(vote, "VOTE_CRASH");
     }
 
     /**
@@ -453,22 +502,29 @@ public class ReplicaManager {
         try (DatagramSocket reqSocket = new DatagramSocket()) {
             // Forward STATE_REQUEST to the co-located replica
             String stateReq = "STATE_REQUEST:" + replicaId;
-            byte[] data = stateReq.getBytes(StandardCharsets.UTF_8);
-            reqSocket.send(new DatagramPacket(data, data.length,
-                InetAddress.getByName("localhost"), replicaPort));
+            InetAddress localhost = InetAddress.getByName("localhost");
+            boolean reqAcked = sender.send(stateReq, localhost, replicaPort, reqSocket);
+            if (!reqAcked) {
+                System.err.println("RM" + replicaId + ": STATE_REQUEST to replica not ACKed");
+                return;
+            }
 
             // Wait for STATE_TRANSFER response from the replica
             reqSocket.setSoTimeout(10000);
             byte[] buf = new byte[65535]; // snapshots can be large
             DatagramPacket response = new DatagramPacket(buf, buf.length);
             reqSocket.receive(response);
+            sendAckToPacket(reqSocket, response, "STATE_TRANSFER");
             String stateResponse = new String(response.getData(), 0, response.getLength(),
                 StandardCharsets.UTF_8);
 
             // Relay the snapshot back to the requesting RM
-            byte[] forwardData = stateResponse.getBytes(StandardCharsets.UTF_8);
-            socket.send(new DatagramPacket(forwardData, forwardData.length,
-                from.getAddress(), from.getPort()));
+            try (DatagramSocket relaySocket = new DatagramSocket()) {
+                boolean relayAcked = sender.send(stateResponse, from.getAddress(), from.getPort(), relaySocket);
+                if (!relayAcked) {
+                    System.err.println("RM" + replicaId + ": STATE_TRANSFER relay not ACKed by requester RM");
+                }
+            }
         } catch (Exception e) {
             System.err.println("RM" + replicaId + ": State request handling failed: " + e.getMessage());
         }
@@ -514,22 +570,37 @@ public class ReplicaManager {
         try (DatagramSocket socket = new DatagramSocket()) {
             String initMsg = "INIT_STATE:" + snapshot;
             byte[] data = initMsg.getBytes(StandardCharsets.UTF_8);
-            socket.send(new DatagramPacket(data, data.length,
-                InetAddress.getByName("localhost"), replicaPort));
+            InetAddress localhost = InetAddress.getByName("localhost");
+            DatagramPacket initPacket = new DatagramPacket(data, data.length, localhost, replicaPort);
 
-            // Wait for ACK — format: ACK:INIT_STATE:<replicaId>:<lastSeqNum>
-            socket.setSoTimeout(5000);
-            byte[] buf = new byte[8192];
-            DatagramPacket ack = new DatagramPacket(buf, buf.length);
-            socket.receive(ack);
-            String ackStr = new String(ack.getData(), 0, ack.getLength(), StandardCharsets.UTF_8);
-            String[] ackParts = ackStr.split(":");
-            int lastSeqNum = -1;
-            if (ackParts.length >= 4) {
-                lastSeqNum = Integer.parseInt(ackParts[3]);
+            int timeout = RELIABLE_INIT_TIMEOUT_MS;
+            for (int attempt = 0; attempt <= RELIABLE_MAX_RETRIES; attempt++) {
+                try {
+                    socket.send(initPacket);
+                    socket.setSoTimeout(timeout);
+
+                    // Wait for ACK — format: ACK:INIT_STATE:<replicaId>:<lastSeqNum>
+                    byte[] buf = new byte[8192];
+                    DatagramPacket ack = new DatagramPacket(buf, buf.length);
+                    socket.receive(ack);
+                    String ackStr = new String(ack.getData(), 0, ack.getLength(), StandardCharsets.UTF_8);
+                    if (!ackStr.startsWith("ACK:INIT_STATE:")) {
+                        continue;
+                    }
+                    sendAckToPacket(socket, ack, "INIT_STATE");
+                    String[] ackParts = ackStr.split(":");
+                    int lastSeqNum = -1;
+                    if (ackParts.length >= 4) {
+                        lastSeqNum = Integer.parseInt(ackParts[3]);
+                    }
+                    System.out.println("RM" + replicaId + ": State transfer complete, lastSeq=" + lastSeqNum);
+                    return lastSeqNum;
+                } catch (SocketTimeoutException e) {
+                    timeout *= 2;
+                }
             }
-            System.out.println("RM" + replicaId + ": State transfer complete, lastSeq=" + lastSeqNum);
-            return lastSeqNum;
+            System.err.println("RM" + replicaId + ": State transfer ACK not received after retries");
+            return -1;
         } catch (Exception e) {
             System.err.println("RM" + replicaId + ": State transfer failed: " + e.getMessage());
             return -1;
@@ -543,15 +614,23 @@ public class ReplicaManager {
     protected void notifyReplicaReady(int lastSeqNum) {
         try (DatagramSocket socket = new DatagramSocket()) {
             String readyMsg = buildReplicaReadyMessage(lastSeqNum);
-            byte[] readyData = readyMsg.getBytes(StandardCharsets.UTF_8);
             InetAddress localhost = InetAddress.getByName("localhost");
-            socket.send(new DatagramPacket(readyData, readyData.length,
-                localhost, PortConfig.SEQUENCER));
-            socket.send(new DatagramPacket(readyData, readyData.length,
-                localhost, PortConfig.FE_UDP));
+            boolean sequencerAcked = sender.send(readyMsg, localhost, PortConfig.SEQUENCER, socket);
+            if (!sequencerAcked) {
+                System.err.println("RM" + replicaId + ": REPLICA_READY not ACKed by Sequencer");
+            }
+            boolean feAcked = sender.send(readyMsg, localhost, PortConfig.FE_UDP, socket);
+            if (!feAcked) {
+                System.err.println("RM" + replicaId + ": REPLICA_READY not ACKed by FE");
+            }
             for (int rmPort : PortConfig.ALL_RMS) {
-                socket.send(new DatagramPacket(readyData, readyData.length,
-                    localhost, rmPort));
+                if (rmPort == this.rmPort) {
+                    continue;
+                }
+                boolean rmAcked = sender.send(readyMsg, localhost, rmPort, socket);
+                if (!rmAcked) {
+                    System.err.println("RM" + replicaId + ": REPLICA_READY not ACKed by RM port " + rmPort);
+                }
             }
         } catch (Exception e) {
             System.err.println("RM" + replicaId + ": REPLICA_READY send failed: " + e.getMessage());
@@ -575,14 +654,18 @@ public class ReplicaManager {
 
             try (DatagramSocket socket = new DatagramSocket()) {
                 String req = "STATE_REQUEST:" + replicaId;
-                byte[] reqData = req.getBytes(StandardCharsets.UTF_8);
-                socket.send(new DatagramPacket(reqData, reqData.length,
-                    InetAddress.getByName("localhost"), targetRmPort));
+                InetAddress localhost = InetAddress.getByName("localhost");
+                boolean requestAcked = sender.send(req, localhost, targetRmPort, socket);
+                if (!requestAcked) {
+                    System.err.println("RM" + replicaId + ": STATE_REQUEST not ACKed by RM port " + targetRmPort);
+                    continue;
+                }
 
                 socket.setSoTimeout(10000);
                 byte[] buf = new byte[65535];
                 DatagramPacket response = new DatagramPacket(buf, buf.length);
                 socket.receive(response);
+                sendAckToPacket(socket, response, "STATE_TRANSFER");
                 String raw = new String(response.getData(), 0, response.getLength(),
                     StandardCharsets.UTF_8);
 

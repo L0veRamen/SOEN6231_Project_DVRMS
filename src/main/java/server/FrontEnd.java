@@ -48,7 +48,9 @@ public class FrontEnd {
     }
 
     public FrontEnd() {
-        new Thread(this::listenForResults, "FE-ResultListener").start();
+        if (!"true".equals(System.getProperty("dvrms.disable.udp"))) {
+            new Thread(this::listenForResults, "FE-ResultListener").start();
+        }
     }
 
     // ===== @WebMethod — same signatures as VehicleReservationWS =====
@@ -84,7 +86,8 @@ public class FrontEnd {
             @WebParam(name = "vehicleID") String vehicleID,
             @WebParam(name = "startDate") String startDate,
             @WebParam(name = "endDate") String endDate) {
-        String operation = "RESERVE:" + customerID + ":" + vehicleID + ":" + startDate + ":" + endDate;
+        // Execute-path operation: route by customer office so A3 home-office logic is preserved.
+        String operation = "RESERVE_EXECUTE:" + customerID + ":" + vehicleID + ":" + startDate + ":" + endDate;
         return forwardAndCollect(operation);
     }
 
@@ -94,7 +97,9 @@ public class FrontEnd {
             @WebParam(name = "vehicleID") String vehicleID,
             @WebParam(name = "newStartDate") String newStartDate,
             @WebParam(name = "newEndDate") String newEndDate) {
-        String operation = "ATOMIC_UPDATE:" + customerID + ":" + vehicleID + ":" + newStartDate + ":" + newEndDate;
+        // Execute-path operation: route by customer office so A3 home-office logic is preserved.
+        String operation =
+            "ATOMIC_UPDATE_EXECUTE:" + customerID + ":" + vehicleID + ":" + newStartDate + ":" + newEndDate;
         return forwardAndCollect(operation);
     }
 
@@ -102,7 +107,8 @@ public class FrontEnd {
     public String cancelReservation(
             @WebParam(name = "customerID") String customerID,
             @WebParam(name = "vehicleID") String vehicleID) {
-        String operation = "CANCEL:" + customerID + ":" + vehicleID;
+        // Execute-path operation: route by customer office so A3 home-office logic is preserved.
+        String operation = "CANCEL_EXECUTE:" + customerID + ":" + vehicleID;
         return forwardAndCollect(operation);
     }
 
@@ -110,7 +116,7 @@ public class FrontEnd {
     public String findVehicle(
             @WebParam(name = "customerID") String customerID,
             @WebParam(name = "vehicleType") String vehicleType) {
-        String operation = "FIND:" + vehicleType;
+        String operation = "FIND:" + customerID + ":" + vehicleType;
         return forwardAndCollect(operation);
     }
 
@@ -210,6 +216,16 @@ public class FrontEnd {
 
     // ===== UDP listener for RESULT messages =====
 
+    private void ackUdpMessage(DatagramSocket socket, DatagramPacket packet, String token) {
+        try {
+            String ack = "ACK:" + token;
+            byte[] ackData = ack.getBytes(StandardCharsets.UTF_8);
+            socket.send(new DatagramPacket(ackData, ackData.length, packet.getAddress(), packet.getPort()));
+        } catch (Exception e) {
+            System.err.println("FE ACK send error: " + e.getMessage());
+        }
+    }
+
     private void listenForResults() {
         try (DatagramSocket socket = new DatagramSocket(PortConfig.FE_UDP)) {
             byte[] buf = new byte[8192];
@@ -220,6 +236,7 @@ public class FrontEnd {
 
                 UDPMessage msg = UDPMessage.parse(raw);
                 if (msg.getType() == UDPMessage.Type.RESULT) {
+                    ackUdpMessage(socket, packet, "RESULT");
                     int seqNum = Integer.parseInt(msg.getField(0));
                     String reqID = msg.getField(1);
                     String replicaID = msg.getField(2);
@@ -233,6 +250,8 @@ public class FrontEnd {
                     if (ctx != null) {
                         ctx.addResult(replicaID, result.toString(), seqNum);
                     }
+                } else if (msg.getType() == UDPMessage.Type.REPLICA_READY) {
+                    ackUdpMessage(socket, packet, "REPLICA_READY");
                 }
             }
         } catch (Exception e) {

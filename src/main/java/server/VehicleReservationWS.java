@@ -68,6 +68,7 @@ public class VehicleReservationWS {
   private final ConcurrentHashMap<String, Object> vehicleLocks;
   private final BudgetManager budget = new BudgetManager();
   private final DateRules dateRules;
+  private final ReliableUDPSender reliableSender = new ReliableUDPSender();
 
   // P2: Holdback queue for total ordering
   private int nextExpectedSeq = 0;
@@ -1017,13 +1018,20 @@ public class VehicleReservationWS {
         return (parts.length >= 5)
             ? reserveVehicleLocal(parts[1], parts[2], parts[3], parts[4], false)
             : "FAIL: Invalid reserve request";
+      case "RESERVE_EXECUTE":
+        return (parts.length >= 5)
+            ? reserveVehicle(parts[1], parts[2], parts[3], parts[4])
+            : "FAIL: Invalid reserve execute request";
       case "CANCEL":
-        // applyBudget=false: budget is managed by the home server for remote cancels
         return (parts.length >= 3)
             ? cancelReservationLocal(parts[1], parts[2], false)
             : "FAIL: Invalid cancel request";
+      case "CANCEL_EXECUTE":
+        return (parts.length >= 3)
+            ? cancelReservation(parts[1], parts[2])
+            : "FAIL: Invalid cancel execute request";
       case "FIND":
-        return (parts.length >= 2) ? findVehicleLocal(parts[1]) : "FAIL: Invalid find request";
+        return (parts.length >= 3) ? findVehicleLocal(parts[2]) : "FAIL: Invalid find request";
       case "LISTRES":
         return (parts.length >= 2)
             ? listCustomerReservationsLocal(parts[1])
@@ -1033,11 +1041,13 @@ public class VehicleReservationWS {
             ? addToWaitListLocal(parts[1], parts[2], parts[3], parts[4])
             : "FAIL: Invalid waitlist request";
       case "ATOMIC_UPDATE":
-        // NEW in Assignment 2 — atomic 3-step update
-        // applyBudget=false: budget is managed by the home server for remote updates
         return (parts.length >= 5)
             ? atomicUpdateLocal(parts[1], parts[2], parts[3], parts[4], false)
             : "FAIL: Invalid atomic update request";
+      case "ATOMIC_UPDATE_EXECUTE":
+        return (parts.length >= 5)
+            ? updateReservation(parts[1], parts[2], parts[3], parts[4])
+            : "FAIL: Invalid atomic update execute request";
       case "SET_BYZANTINE":
         byzantineMode = parts.length >= 2 && "true".equalsIgnoreCase(parts[1]);
         return "OK:BYZANTINE=" + byzantineMode;
@@ -1689,15 +1699,22 @@ public class VehicleReservationWS {
   }
 
   private void sendResultToFE(String feHost, int fePort, String resultMsg) {
-    try {
-      DatagramSocket socket = new DatagramSocket();
-      byte[] data = resultMsg.getBytes(StandardCharsets.UTF_8);
-      socket.send(new DatagramPacket(data, data.length,
-          InetAddress.getByName(feHost), fePort));
-      socket.close();
-    } catch (Exception e) {
-      System.err.println(serverID + ": Failed to send result to FE: " + e.getMessage());
-    }
+    Thread resultSender =
+        new Thread(
+            () -> {
+              try (DatagramSocket socket = new DatagramSocket()) {
+                boolean acked =
+                    reliableSender.send(resultMsg, InetAddress.getByName(feHost), fePort, socket);
+                if (!acked) {
+                  System.err.println(serverID + ": RESULT not ACKed by FE");
+                }
+              } catch (Exception e) {
+                System.err.println(serverID + ": Failed to send result to FE: " + e.getMessage());
+              }
+            },
+            serverID + "-ResultSender");
+    resultSender.setDaemon(true);
+    resultSender.start();
   }
 
   // ==================== P2: STATE SNAPSHOT ====================

@@ -11,7 +11,10 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -101,17 +104,40 @@ class ReplicaManagerBehaviorTest {
         }
 
         try {
+            CountDownLatch latch = new CountDownLatch(rmListeners.length);
+            List<String> votes = Collections.synchronizedList(new ArrayList<>());
+            for (int i = 0; i < rmListeners.length; i++) {
+                final DatagramSocket listener = rmListeners[i];
+                Thread ackThread = new Thread(() -> {
+                    try {
+                        byte[] buf = new byte[1024];
+                        DatagramPacket packet = new DatagramPacket(buf, buf.length);
+                        listener.receive(packet);
+                        String vote = new String(
+                            packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8);
+                        votes.add(vote);
+                        byte[] ackData = "ACK:VOTE".getBytes(StandardCharsets.UTF_8);
+                        listener.send(new DatagramPacket(
+                            ackData, ackData.length, packet.getAddress(), packet.getPort()));
+                    } catch (Exception ignored) {
+                        // Test assertion below will fail if expected votes are not observed.
+                    } finally {
+                        latch.countDown();
+                    }
+                }, "vote-ack-" + i);
+                ackThread.setDaemon(true);
+                ackThread.start();
+            }
+
             try (DatagramSocket outbound = new DatagramSocket()) {
                 rm.handleCrashSuspectDirect(
                     new UDPMessage(UDPMessage.Type.CRASH_SUSPECT, "REQ-1", "5", "3"), outbound);
             }
 
             assertEquals(expectedReplicaPort, rm.lastHeartbeatTargetPort);
-            for (DatagramSocket listener : rmListeners) {
-                byte[] buf = new byte[1024];
-                DatagramPacket packet = new DatagramPacket(buf, buf.length);
-                listener.receive(packet);
-                String vote = new String(packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8);
+            assertTrue(latch.await(2000, TimeUnit.MILLISECONDS), "Did not receive all peer votes");
+            assertEquals(rmListeners.length, votes.size());
+            for (String vote : votes) {
                 assertEquals("VOTE_CRASH:3:CRASH_CONFIRMED:2", vote);
             }
         } finally {
@@ -220,7 +246,7 @@ class ReplicaManagerBehaviorTest {
         }
 
         @Override
-        protected void killReplica() {
+        public void killReplica() {
             killCalled = true;
         }
 

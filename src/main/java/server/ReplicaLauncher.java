@@ -19,6 +19,7 @@ import java.util.TreeMap;
 public class ReplicaLauncher {
 
     private static final String DEFAULT_OFFICE = "MTL";
+    private static final ReliableUDPSender RELIABLE_SENDER = new ReliableUDPSender();
 
     private static final class PendingExecute {
         final int seqNum;
@@ -170,6 +171,10 @@ public class ReplicaLauncher {
                                 packet.getAddress(), packet.getPort()));
                             break;
                         }
+                        case SHUTDOWN: {
+                            System.out.println("Replica " + replicaId + ": SHUTDOWN received");
+                            return;
+                        }
                         case SET_BYZANTINE: {
                             boolean enable = msg.fieldCount() > 0 && "true".equalsIgnoreCase(msg.getField(0));
                             for (VehicleReservationWS office : offices.values()) {
@@ -183,14 +188,13 @@ public class ReplicaLauncher {
                         }
                         case STATE_REQUEST: {
                             // Collect snapshot from all 3 offices
+                            sendPlainAck(socket, packet, "STATE_REQUEST");
                             StringBuilder snapshot = new StringBuilder();
                             snapshot.append(mtl.getStateSnapshot()).append("|");
                             snapshot.append(wpg.getStateSnapshot()).append("|");
                             snapshot.append(bnf.getStateSnapshot());
                             String reply = "STATE_TRANSFER:" + replicaId + ":" + snapshot.toString();
-                            byte[] replyData = reply.getBytes(StandardCharsets.UTF_8);
-                            socket.send(new DatagramPacket(replyData, replyData.length,
-                                packet.getAddress(), packet.getPort()));
+                            sendReliably(reply, packet.getAddress(), packet.getPort());
                             break;
                         }
                         case INIT_STATE: {
@@ -208,9 +212,7 @@ public class ReplicaLauncher {
                             executionGate.resetNextExpectedSeq(nextSeq);
                             int lastSeqNum = nextSeq - 1;
                             String reply = "ACK:INIT_STATE:" + replicaId + ":" + lastSeqNum;
-                            byte[] replyData = reply.getBytes(StandardCharsets.UTF_8);
-                            socket.send(new DatagramPacket(replyData, replyData.length,
-                                packet.getAddress(), packet.getPort()));
+                            sendReliably(reply, packet.getAddress(), packet.getPort());
                             break;
                         }
                         case ACK:
@@ -228,6 +230,28 @@ public class ReplicaLauncher {
         }
     }
 
+    private static void sendPlainAck(DatagramSocket socket, DatagramPacket packet, String token) {
+        try {
+            String ack = "ACK:" + token;
+            byte[] ackData = ack.getBytes(StandardCharsets.UTF_8);
+            socket.send(new DatagramPacket(
+                ackData, ackData.length, packet.getAddress(), packet.getPort()));
+        } catch (Exception e) {
+            System.err.println("Replica: ACK send failed: " + e.getMessage());
+        }
+    }
+
+    private static void sendReliably(String message, InetAddress address, int port) {
+        try (DatagramSocket sendSocket = new DatagramSocket()) {
+            boolean acked = RELIABLE_SENDER.send(message, address, port, sendSocket);
+            if (!acked) {
+                System.err.println("Replica: reliable send not ACKed for message " + message);
+            }
+        } catch (Exception e) {
+            System.err.println("Replica: reliable send failed: " + e.getMessage());
+        }
+    }
+
     static String extractTargetOffice(String operation) {
         if (operation == null || operation.trim().isEmpty()) {
             return DEFAULT_OFFICE;
@@ -240,6 +264,12 @@ public class ReplicaLauncher {
         switch (op) {
             case "FIND":
                 return DEFAULT_OFFICE;
+            case "RESERVE_EXECUTE":
+            case "CANCEL_EXECUTE":
+            case "ATOMIC_UPDATE_EXECUTE":
+                // Execute-path customer operations must run on the customer's home office
+                // so cross-office budget/quota logic stays equivalent to A3 behavior.
+                return officeFromField(parts, 1);
             case "ADDVEHICLE":
             case "REMOVEVEHICLE":
             case "LISTAVAILABLE":
