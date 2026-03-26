@@ -1,6 +1,4 @@
-# Failure Demo Setup (Design-Doc First)
-
-This guide is intentionally simple and demo-friendly.
+# Failure Demo Setup
 
 ## 1) Design in 60 Seconds
 
@@ -8,7 +6,7 @@ This guide is intentionally simple and demo-friendly.
 - A **Byzantine fault** means one replica returns a wrong result. After repeated mismatches, that replica is replaced.
 - A **Crash fault** means one replica does not respond. Replica Manager (RM) replaces it and restores state.
 
-## 2) Preflight (Before You Launch)
+## 2) Preflight
 
 Verify required tools:
 
@@ -18,13 +16,13 @@ for cmd in java mvn wsimport nc lsof; do
 done
 ```
 
-Clean stale processes from previous runs:
+Kill stale processes from previous runs:
 
 ```bash
 pkill -f "server.ReplicaLauncher|server.Sequencer|server.FrontEnd|server.ReplicaManager" || true
 ```
 
-Quick port occupancy check (should be empty before startup):
+Verify ports are free (should return empty):
 
 ```bash
 lsof -nP \
@@ -34,7 +32,7 @@ lsof -nP \
   -iUDP:7001 -iUDP:7002 -iUDP:7003 -iUDP:7004
 ```
 
-## 3) Start System (RM-Owned Replica Lifecycle)
+## 3) Start System
 
 Build once:
 
@@ -42,52 +40,100 @@ Build once:
 mvn clean compile
 ```
 
-Open separate terminals and start in this order:
+Open 7 terminals. Start each component in order -- wait for the expected log before moving to the next.
+
+### Terminal 1 -- Sequencer
 
 ```bash
-# Terminal 1
 java -cp target/classes server.Sequencer
+```
 
-# Terminal 2
+Expected: `Sequencer listening on port 9100`
+
+### Terminal 2 -- Replica Manager 1
+
+```bash
 java -cp target/classes server.ReplicaManager 1
+```
 
-# Terminal 3
+Expected: `RM1: Replica launched on port 6001`
+
+### Terminal 3 -- Replica Manager 2
+
+```bash
 java -cp target/classes server.ReplicaManager 2
+```
 
-# Terminal 4
+Expected: `RM2: Replica launched on port 6002`
+
+### Terminal 4 -- Replica Manager 3
+
+```bash
 java -cp target/classes server.ReplicaManager 3
+```
 
-# Terminal 5
+Expected: `RM3: Replica launched on port 6003`
+
+### Terminal 5 -- Replica Manager 4
+
+```bash
 java -cp target/classes server.ReplicaManager 4
+```
 
-# Terminal 6
+Expected: `RM4: Replica launched on port 6004`
+
+### Terminal 6 -- Front End
+
+```bash
 java -cp target/classes server.FrontEnd
 ```
 
-FE endpoint: `http://localhost:8080/fe?wsdl`
+Expected: `FrontEnd published at http://localhost:8080/fe`
 
-Startup verification (look for these logs):
+### Terminal 7 -- Client
 
-- Sequencer terminal: `Sequencer listening on port 9100`
-- RM terminals:
-  - `RM1..RM4: Replica launched on port 6001..6004`
-  - `RM1..RM4 listening on port 7001..7004`
-  - replica subprocess logs: `Replica <id> started on UDP port 600<id>`
-- FE terminal: `FrontEnd published at http://localhost:8080/fe`
-
-Run client against FE WSDL:
+Build client stubs:
 
 ```bash
 ./build-client.sh --wsdl http://localhost:8080/fe?wsdl
+```
+
+Run the manager client:
+
+```bash
 java -cp bin client.ManagerClient --wsdl http://localhost:8080/fe?wsdl
 ```
 
-Use manager ID `MTLM1111`.
+Run the customer client:
 
-Baseline before fault injection:
+```bash
+java -cp bin client.CustomerClient --wsdl http://localhost:8080/fe?wsdl
+```
 
-1. Run menu option `3` (List Available Vehicles) once.
-2. Confirm response is successful and non-empty.
+The client prompts for an ID at startup. The first 3 characters choose the office, the 4th character chooses the role (`M` = manager, `U` = customer):
+
+| Role | MTL | WPG | BNF |
+|---|---|---|---|
+| Manager | MTLM1000 | WPGM1000 | BNFM1000 |
+| Customer | MTLU1000 | WPGU1000 | BNFU1000 |
+
+To run multiple clients at once, open additional terminals and repeat the `java -cp bin ...` command with a different ID each time.
+
+Baseline before fault injection: run menu option **3** (List Available Vehicles) once and confirm the response is successful.
+
+### Alternative -- One-Command Startup
+
+Instead of opening 7 terminals manually:
+
+```bash
+./demo-start.sh
+```
+
+Logs go to `logs/`. Stop everything with:
+
+```bash
+./demo-stop.sh
+```
 
 ## 4) Three Demo Scenarios
 
@@ -99,28 +145,20 @@ Inject fault:
 echo -n "SET_BYZANTINE:true" | nc -u -w1 localhost 6003
 ```
 
-Trigger detection/replacement:
+From `ManagerClient`, run option **3** at least three times.
 
-From `ManagerClient`, run option `3` at least three times.
-
-Then wait about 8-10 seconds for vote window + replacement + state transfer, and run option `3` once more for post-recovery check.
+Wait 8-10 seconds for replacement + state transfer, then run option **3** once more for post-recovery check.
 
 Expected:
 
 - Client still gets successful responses (not `FAIL`).
-- FE still returns correct result from matching replicas.
 - Replica 3 is replaced automatically.
-- RM logs include:
-  - `Byzantine replace requested for 3`
-  - `Starting replica replacement`
-  - `State transfer complete, lastSeq=...`
-- Sequencer log includes:
-  - `3 ready, replaying from seq ...`
+- RM3 logs: `Byzantine replace requested for 3`, `Starting replica replacement`, `State transfer complete, lastSeq=...`
+- Sequencer log: `3 ready, replaying from seq ...`
 
-Narration cue:
-- "Inject Byzantine on replica 3, show client still succeeds, then show RM3 replacement and sequencer replay."
+Narration: "Inject Byzantine on replica 3, show client still succeeds, then show RM3 replacement and sequencer replay."
 
-Optional reset:
+Reset:
 
 ```bash
 echo -n "SET_BYZANTINE:false" | nc -u -w1 localhost 6003
@@ -128,77 +166,61 @@ echo -n "SET_BYZANTINE:false" | nc -u -w1 localhost 6003
 
 ### B) Crash Demo (Replica 2)
 
-Inject fault (safe kill command):
+Inject fault:
 
 ```bash
-pid=$(lsof -ti udp:6002 | head -n1)
-if [ -n "$pid" ]; then
-  kill "$pid"
-  echo "Killed replica on udp:6002 (pid=$pid)"
-else
-  echo "Replica 2 already down (no process bound to udp:6002)"
-fi
+kill $(lsof -ti udp:6002 | head -n1)
 ```
 
-Then from `ManagerClient`:
+From `ManagerClient`:
 
-1. Run option `3` once (triggers crash handling path).
-2. Wait about 8-10 seconds for recovery.
-3. Run option `3` again (post-recovery verification).
+1. Run option **3** once (triggers crash handling).
+2. Wait 8-10 seconds for recovery.
+3. Run option **3** again (post-recovery verification).
 
 Expected:
 
 - Requests still succeed (not `FAIL`).
 - RM2 recovers replica 2 and synchronizes state.
-- RM2 logs include:
-  - `Starting replica replacement`
-  - `State transfer complete, lastSeq=...`
-- Sequencer log includes:
-  - `2 ready, replaying from seq ...`
+- RM2 logs: `Starting replica replacement`, `State transfer complete, lastSeq=...`
+- Sequencer log: `2 ready, replaying from seq ...`
 
-Narration cue:
-- "Crash replica 2, show request still succeeds from remaining replicas, then show RM2 recovery logs."
+Narration: "Crash replica 2, show request still succeeds from remaining replicas, then show RM2 recovery logs."
 
 ### C) Simultaneous Demo (Crash + Byzantine)
 
 Inject both faults:
 
 ```bash
-pid=$(lsof -ti udp:6002 | head -n1)
-if [ -n "$pid" ]; then
-  kill "$pid"
-  echo "Killed replica on udp:6002 (pid=$pid)"
-else
-  echo "Replica 2 already down (no process bound to udp:6002)"
-fi
+kill $(lsof -ti udp:6002 | head -n1)
+```
 
+```bash
 echo -n "SET_BYZANTINE:true" | nc -u -w1 localhost 6003
 ```
 
-Then from `ManagerClient`, run option `3` three times (not once).
+From `ManagerClient`, run option **3** three times.
 
-- First request demonstrates immediate tolerance: 1 crash + 1 Byzantine still returns correct majority from 2 good replicas.
+- First request shows immediate tolerance: 2 healthy replicas still return correct majority.
 - Repeated requests drive Byzantine strike count to replacement threshold.
-- Wait about 8-10 seconds and run option `3` once more for post-recovery verification.
+
+Wait 8-10 seconds, then run option **3** once more for post-recovery verification.
 
 Expected:
 
 - Immediate: FE returns correct result from two matching healthy replicas.
-- Delayed: RM2 (crash) and RM3 (Byzantine) recovery workflows execute; replacement/state transfer logs appear.
-- Sequencer includes replay logs for recovered replicas:
-  - `2 ready, replaying from seq ...`
-  - `3 ready, replaying from seq ...`
+- Delayed: RM2 and RM3 recovery workflows execute; replacement/state transfer logs appear.
+- Sequencer logs: `2 ready, replaying from seq ...` and `3 ready, replaying from seq ...`
 
-Narration cue:
-- "Inject crash + Byzantine together, show immediate correct response, then show both recovery paths in logs."
+Narration: "Inject crash + Byzantine together, show immediate correct response, then show both recovery paths in logs."
 
-Optional reset:
+Reset:
 
 ```bash
 echo -n "SET_BYZANTINE:false" | nc -u -w1 localhost 6003
 ```
 
-## 5) Reset/Cleanup Between Scenarios
+## 5) Reset Between Scenarios
 
 Minimal reset (recommended between A/B/C):
 
@@ -206,50 +228,30 @@ Minimal reset (recommended between A/B/C):
 echo -n "SET_BYZANTINE:false" | nc -u -w1 localhost 6003 || true
 ```
 
-Deterministic full reset (if any scenario output looks inconsistent):
+Full reset (then restart from section 3):
 
 ```bash
 pkill -f "server.ReplicaLauncher|server.Sequencer|server.FrontEnd|server.ReplicaManager" || true
 ```
 
-Then restart from section **3) Start System**.
-
-## 6) What to Look For (Simple)
+## 6) What to Look For
 
 - FE side: request returns success (not `FAIL`).
-- RM side includes `Byzantine replace requested for 3` (Byzantine scenarios).
-- RM side includes `Starting replica replacement`.
-- RM side includes `State transfer complete`.
-- Sequencer side includes `<replicaID> ready, replaying from seq`.
+- RM side: `Byzantine replace requested for 3` (Byzantine scenarios).
+- RM side: `Starting replica replacement`.
+- RM side: `State transfer complete`.
+- Sequencer side: `<replicaID> ready, replaying from seq`.
 
-## 7) Backup Verification (Optional)
-
-If you want quick proof via tests instead of manual demo:
+## 7) Verify via Tests (Optional)
 
 ```bash
-# Byzantine core flow
 mvn -q -Dtest=integration.ReplicationIntegrationTest#t6_byzantineFirstStrike+t7_byzantineSecondStrike+t8_byzantineThirdStrikeReplace test
-
-# Crash core flow
-mvn -q -Dtest=integration.ReplicationIntegrationTest#t11_crashDetection+t12_crashRecovery test
-
-# Simultaneous core tolerance
-mvn -q -Dtest=integration.ReplicationIntegrationTest#t15_crashPlusByzantine test
 ```
 
-## 8) Rehearsal Test Plan
+```bash
+mvn -q -Dtest=integration.ReplicationIntegrationTest#t11_crashDetection+t12_crashRecovery test
+```
 
-1. Cold-start rehearsal from clean ports (use preflight + startup verification).
-2. Run scenarios A, B, C in order, using reset between scenarios.
-3. Ask one teammate to execute this file verbatim and note unclear points.
-4. Confirm each scenario shows at least one full checkpoint set:
-   - client success
-   - RM replacement/state transfer
-   - Sequencer replay-ready log
-
-## 9) Assumptions
-
-- `SETUP.md` remains unchanged.
-- Demo uses RM-owned replica lifecycle (no manual `ReplicaLauncher` terminals).
-- Demo runs on one localhost machine.
-- Goal is presentation reliability, not exhaustive protocol validation.
+```bash
+mvn -q -Dtest=integration.ReplicationIntegrationTest#t15_crashPlusByzantine test
+```
