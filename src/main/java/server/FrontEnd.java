@@ -10,7 +10,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 
-@WebService(serviceName = "VehicleReservationService")
+@WebService(name = "VehicleReservationWS", serviceName = "VehicleReservationService")
 public class FrontEnd {
 
     private final ConcurrentHashMap<String, RequestContext> pendingRequests = new ConcurrentHashMap<>();
