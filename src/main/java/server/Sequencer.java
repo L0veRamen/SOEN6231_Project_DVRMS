@@ -50,13 +50,15 @@ public class Sequencer {
                         handleRequest(msg, socket);
                         break;
                     case ACK:
+                        sendProtocolAck(socket, packet, "ACK");
                         handleAck(msg, packet);
                         break;
                     case NACK:
+                        sendProtocolAck(socket, packet, "NACK");
                         handleNack(msg, socket, packet);
                         break;
                     case REPLICA_READY:
-                        handleReplicaReady(msg, socket);
+                        handleReplicaReady(msg, socket, packet);
                         break;
                     default:
                         break;
@@ -64,6 +66,17 @@ public class Sequencer {
             }
         } catch (Exception e) {
             System.err.println("Sequencer error: " + e.getMessage());
+        }
+    }
+
+    private void sendProtocolAck(DatagramSocket socket, DatagramPacket source, String token) {
+        try {
+            String ack = "ACK:" + token;
+            byte[] ackData = ack.getBytes(StandardCharsets.UTF_8);
+            socket.send(new DatagramPacket(
+                ackData, ackData.length, source.getAddress(), source.getPort()));
+        } catch (Exception e) {
+            System.err.println("Sequencer: failed to send protocol ACK: " + e.getMessage());
         }
     }
 
@@ -91,12 +104,47 @@ public class Sequencer {
                     boolean acked = sender.send(message, addr.getAddress(), addr.getPort(), sendSocket);
                     if (!acked) {
                         System.err.println("Sequencer: replica at " + addr.getPort() + " unresponsive");
+                        notifyRmsCrashSuspectFor(message, addr.getPort());
                     }
                 } catch (Exception e) {
                     System.err.println("Sequencer: multicast send error: " + e.getMessage());
                 }
             }).start();
         }
+    }
+
+    private void notifyRmsCrashSuspectFor(String executeMessage, int replicaPort) {
+        try {
+            String[] parts = executeMessage.split(":", 5);
+            if (parts.length < 3 || !"EXECUTE".equals(parts[0])) {
+                return;
+            }
+            int seqNum = Integer.parseInt(parts[1]);
+            String reqID = parts[2];
+            int replicaId = replicaIdForPort(replicaPort);
+            if (replicaId < 0) {
+                return;
+            }
+
+            String crashMsg = "CRASH_SUSPECT:" + reqID + ":" + seqNum + ":" + replicaId;
+            InetAddress localhost = InetAddress.getByName("localhost");
+            try (DatagramSocket rmSocket = new DatagramSocket()) {
+                for (int rmPort : PortConfig.ALL_RMS) {
+                    sender.send(crashMsg, localhost, rmPort, rmSocket);
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Sequencer: failed to notify RMs about unresponsive replica: " + e.getMessage());
+        }
+    }
+
+    private int replicaIdForPort(int replicaPort) {
+        for (int i = 0; i < PortConfig.ALL_REPLICAS.length; i++) {
+            if (PortConfig.ALL_REPLICAS[i] == replicaPort) {
+                return i + 1;
+            }
+        }
+        return -1;
     }
 
     private void handleAck(UDPMessage msg, DatagramPacket from) {
@@ -138,7 +186,7 @@ public class Sequencer {
         }
     }
 
-    private void handleReplicaReady(UDPMessage msg, DatagramSocket socket) {
+    private void handleReplicaReady(UDPMessage msg, DatagramSocket socket, DatagramPacket from) {
         String replicaID = msg.getField(0);
         String host = msg.getField(1);
         int replicaPort = Integer.parseInt(msg.getField(2));
@@ -172,6 +220,14 @@ public class Sequencer {
             replicaAddresses.removeIf(a -> a.getPort() == replicaPort);
             replicaAddresses.add(newAddr);
         } catch (Exception e) { /* log */ }
+
+        try {
+            String ack = "ACK:REPLICA_READY:" + replicaID;
+            byte[] ackData = ack.getBytes(StandardCharsets.UTF_8);
+            socket.send(new DatagramPacket(ackData, ackData.length, from.getAddress(), from.getPort()));
+        } catch (Exception e) {
+            System.err.println("Sequencer: failed to ACK REPLICA_READY: " + e.getMessage());
+        }
     }
 
     public static void main(String[] args) {

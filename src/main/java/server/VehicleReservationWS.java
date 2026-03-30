@@ -40,7 +40,8 @@ public class VehicleReservationWS {
   // UDP Ports
   private static final Map<String, Integer> UDP_PORTS = buildUdpPorts();
   private static final String TOOLING_DEFAULT_SERVER_ID = "MTL";
-  private static final int TOOLING_DEFAULT_UDP_PORT = 5001;
+  private static final int TOOLING_DEFAULT_UDP_PORT =
+      PortConfig.officePort(1, TOOLING_DEFAULT_SERVER_ID);
   // ==================== Message Templates ====================
   private static final String MSG_UNAUTHORIZED_MANAGER =
       "FAIL: Manager %s not authorized for %s server";
@@ -58,6 +59,7 @@ public class VehicleReservationWS {
   private static final String MSG_NO_RESERVATION =
       "FAIL: No reservation found for customer %s on vehicle %s";
   private final String serverID; // MTL, WPG, or BNF
+  private final String replicaIDForResult; // Numeric replica ID (1..4) for P2 RESULT messages
   // ==================== Data Structures ====================
   // Per-instance data (each server has its own)
   private final ConcurrentHashMap<String, Vehicle> vehicleDB;
@@ -66,6 +68,7 @@ public class VehicleReservationWS {
   private final ConcurrentHashMap<String, Object> vehicleLocks;
   private final BudgetManager budget = new BudgetManager();
   private final DateRules dateRules;
+  private final ReliableUDPSender reliableSender = new ReliableUDPSender();
 
   // P2: Holdback queue for total ordering
   private int nextExpectedSeq = 0;
@@ -75,13 +78,18 @@ public class VehicleReservationWS {
   private volatile boolean byzantineMode = false;
   /** No-arg constructor required by JAX-WS tooling (e.g., wsgen). */
   public VehicleReservationWS() {
-    this(TOOLING_DEFAULT_SERVER_ID, TOOLING_DEFAULT_UDP_PORT, false);
+    this(TOOLING_DEFAULT_SERVER_ID, TOOLING_DEFAULT_UDP_PORT, false, null);
   }
   public VehicleReservationWS(String serverID, int udpPort) {
-    this(serverID, udpPort, true);
+    this(serverID, udpPort, true, null);
   }
-  private VehicleReservationWS(String serverID, int udpPort, boolean bootstrapRuntime) {
+  public VehicleReservationWS(String serverID, int udpPort, String replicaIDForResult) {
+    this(serverID, udpPort, true, replicaIDForResult);
+  }
+  private VehicleReservationWS(
+      String serverID, int udpPort, boolean bootstrapRuntime, String replicaIDForResult) {
     this.serverID = serverID;
+    this.replicaIDForResult = replicaIDForResult;
     this.vehicleDB = new ConcurrentHashMap<>();
     this.reservations = new ConcurrentHashMap<>();
     this.waitList = new ConcurrentHashMap<>();
@@ -111,9 +119,9 @@ public class VehicleReservationWS {
 
   private static Map<String, Integer> buildUdpPorts() {
     Map<String, Integer> ports = new LinkedHashMap<>();
-    ports.put("MTL", 5001);
-    ports.put("WPG", 5002);
-    ports.put("BNF", 5003);
+    ports.put("MTL", PortConfig.officePort(1, "MTL"));
+    ports.put("WPG", PortConfig.officePort(1, "WPG"));
+    ports.put("BNF", PortConfig.officePort(1, "BNF"));
     return Collections.unmodifiableMap(ports);
   }
 
@@ -989,17 +997,41 @@ public class VehicleReservationWS {
     }
     String operation = parts[0];
     switch (operation) {
+      case "ADDVEHICLE":
+        if (parts.length < 6) {
+          return "FAIL: Invalid add vehicle request";
+        }
+        try {
+          return addVehicle(parts[1], parts[2], parts[3], parts[4], Double.parseDouble(parts[5]));
+        } catch (NumberFormatException e) {
+          return "FAIL: Invalid vehicle price";
+        }
+      case "REMOVEVEHICLE":
+        return (parts.length >= 3)
+            ? removeVehicle(parts[1], parts[2])
+            : "FAIL: Invalid remove vehicle request";
+      case "LISTAVAILABLE":
+        return (parts.length >= 2)
+            ? listAvailableVehicle(parts[1])
+            : "FAIL: Invalid list available request";
       case "RESERVE":
         return (parts.length >= 5)
             ? reserveVehicleLocal(parts[1], parts[2], parts[3], parts[4], false)
             : "FAIL: Invalid reserve request";
+      case "RESERVE_EXECUTE":
+        return (parts.length >= 5)
+            ? reserveVehicle(parts[1], parts[2], parts[3], parts[4])
+            : "FAIL: Invalid reserve execute request";
       case "CANCEL":
-        // applyBudget=false: budget is managed by the home server for remote cancels
         return (parts.length >= 3)
             ? cancelReservationLocal(parts[1], parts[2], false)
             : "FAIL: Invalid cancel request";
+      case "CANCEL_EXECUTE":
+        return (parts.length >= 3)
+            ? cancelReservation(parts[1], parts[2])
+            : "FAIL: Invalid cancel execute request";
       case "FIND":
-        return (parts.length >= 2) ? findVehicleLocal(parts[1]) : "FAIL: Invalid find request";
+        return (parts.length >= 3) ? findVehicleLocal(parts[2]) : "FAIL: Invalid find request";
       case "LISTRES":
         return (parts.length >= 2)
             ? listCustomerReservationsLocal(parts[1])
@@ -1009,11 +1041,13 @@ public class VehicleReservationWS {
             ? addToWaitListLocal(parts[1], parts[2], parts[3], parts[4])
             : "FAIL: Invalid waitlist request";
       case "ATOMIC_UPDATE":
-        // NEW in Assignment 2 — atomic 3-step update
-        // applyBudget=false: budget is managed by the home server for remote updates
         return (parts.length >= 5)
             ? atomicUpdateLocal(parts[1], parts[2], parts[3], parts[4], false)
             : "FAIL: Invalid atomic update request";
+      case "ATOMIC_UPDATE_EXECUTE":
+        return (parts.length >= 5)
+            ? updateReservation(parts[1], parts[2], parts[3], parts[4])
+            : "FAIL: Invalid atomic update execute request";
       case "SET_BYZANTINE":
         byzantineMode = parts.length >= 2 && "true".equalsIgnoreCase(parts[1]);
         return "OK:BYZANTINE=" + byzantineMode;
@@ -1454,6 +1488,18 @@ public class VehicleReservationWS {
     return nextExpectedSeq;
   }
 
+  synchronized void syncNextExpectedSeq(int nextExpectedSeq) {
+    this.nextExpectedSeq = nextExpectedSeq;
+    holdbackQueue.clear();
+  }
+
+  synchronized String executeCommittedSequence(
+      int seqNum, String reqID, String feHost, int fePort, String operation) {
+    this.nextExpectedSeq = seqNum;
+    holdbackQueue.clear();
+    return executeAndDeliver(seqNum, reqID, feHost, fePort, operation);
+  }
+
   void resetLocalStateForTests() {
     vehicleDB.clear();
     waitList.clear();
@@ -1634,27 +1680,41 @@ public class VehicleReservationWS {
 
   private String executeAndDeliver(int seqNum, String reqID,
                                     String feHost, int fePort, String operation) {
+    String resultReplicaId =
+        (replicaIDForResult != null && !replicaIDForResult.isEmpty())
+            ? replicaIDForResult
+            : serverID;
     if (byzantineMode) {
       nextExpectedSeq++;
-      return "RESULT:" + seqNum + ":" + reqID + ":" + serverID + ":BYZANTINE_RANDOM_" + System.nanoTime();
+      String resultMsg = "RESULT:" + seqNum + ":" + reqID + ":" + resultReplicaId
+          + ":BYZANTINE_RANDOM_" + System.nanoTime();
+      sendResultToFE(feHost, fePort, resultMsg);
+      return resultMsg;
     }
     String result = handleUDPRequest(operation);
     nextExpectedSeq++;
-    String resultMsg = "RESULT:" + seqNum + ":" + reqID + ":" + serverID + ":" + result;
+    String resultMsg = "RESULT:" + seqNum + ":" + reqID + ":" + resultReplicaId + ":" + result;
     sendResultToFE(feHost, fePort, resultMsg);
     return resultMsg;
   }
 
   private void sendResultToFE(String feHost, int fePort, String resultMsg) {
-    try {
-      DatagramSocket socket = new DatagramSocket();
-      byte[] data = resultMsg.getBytes(StandardCharsets.UTF_8);
-      socket.send(new DatagramPacket(data, data.length,
-          InetAddress.getByName(feHost), fePort));
-      socket.close();
-    } catch (Exception e) {
-      System.err.println(serverID + ": Failed to send result to FE: " + e.getMessage());
-    }
+    Thread resultSender =
+        new Thread(
+            () -> {
+              try (DatagramSocket socket = new DatagramSocket()) {
+                boolean acked =
+                    reliableSender.send(resultMsg, InetAddress.getByName(feHost), fePort, socket);
+                if (!acked) {
+                  System.err.println(serverID + ": RESULT not ACKed by FE");
+                }
+              } catch (Exception e) {
+                System.err.println(serverID + ": Failed to send result to FE: " + e.getMessage());
+              }
+            },
+            serverID + "-ResultSender");
+    resultSender.setDaemon(true);
+    resultSender.start();
   }
 
   // ==================== P2: STATE SNAPSHOT ====================

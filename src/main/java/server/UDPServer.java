@@ -50,41 +50,57 @@ public class UDPServer implements Runnable {
                   receivePacket.getData(), 0, receivePacket.getLength(), StandardCharsets.UTF_8);
           System.out.println("[" + servant.getServerID() + "] UDP Received: " + request);
 
-          // P2: Parse message using UDPMessage
-          UDPMessage msg = UDPMessage.parse(request);
+          if (isProtocolPayload(request)) {
+            UDPMessage msg = UDPMessage.parse(request);
 
-          // P2: ACK messages are handled silently
-          if (msg.getType() == UDPMessage.Type.ACK) {
-            continue;
-          }
+            // P2: ACK messages are handled silently
+            if (msg.getType() == UDPMessage.Type.ACK) {
+              continue;
+            }
 
-          // P2: Extract msgId for dedup (first field for most messages)
-          String msgId = msg.getField(0);
+            // P2: Extract msgId for dedup (first field for most messages)
+            String msgId = msg.fieldCount() > 0 ? msg.getField(0) : request;
 
-          // P2: Dedup — if already delivered, ACK but don't re-execute
-          if (deliveredMsgIds.contains(msgId)) {
+            // P2: Dedup — if already delivered, ACK but don't re-execute
+            if (deliveredMsgIds.contains(msgId)) {
+              String ack = "ACK:" + msgId;
+              byte[] ackData = ack.getBytes(StandardCharsets.UTF_8);
+              serverSocket.send(
+                  new DatagramPacket(
+                      ackData,
+                      ackData.length,
+                      receivePacket.getAddress(),
+                      receivePacket.getPort()));
+              continue;
+            }
+
+            String response = servant.handleUDPRequest(request);
+            deliveredMsgIds.add(msgId);
+
+            // P2: Send ACK back to sender
             String ack = "ACK:" + msgId;
             byte[] ackData = ack.getBytes(StandardCharsets.UTF_8);
-            serverSocket.send(new DatagramPacket(ackData, ackData.length,
-                receivePacket.getAddress(), receivePacket.getPort()));
+            serverSocket.send(
+                new DatagramPacket(
+                    ackData, ackData.length, receivePacket.getAddress(), receivePacket.getPort()));
+
+            byte[] sendData = response.getBytes(StandardCharsets.UTF_8);
+            DatagramPacket sendPacket =
+                new DatagramPacket(
+                    sendData, sendData.length, receivePacket.getAddress(), receivePacket.getPort());
+            serverSocket.send(sendPacket);
+
+            System.out.println("[" + servant.getServerID() + "] UDP Response: " + response);
             continue;
           }
 
+          // Legacy A3 payload path: dispatch directly, no protocol ACK/dedup semantics.
           String response = servant.handleUDPRequest(request);
-          deliveredMsgIds.add(msgId);
-
-          // P2: Send ACK back to sender
-          String ack = "ACK:" + msgId;
-          byte[] ackData = ack.getBytes(StandardCharsets.UTF_8);
-          serverSocket.send(new DatagramPacket(ackData, ackData.length,
-              receivePacket.getAddress(), receivePacket.getPort()));
-
           byte[] sendData = response.getBytes(StandardCharsets.UTF_8);
           DatagramPacket sendPacket =
               new DatagramPacket(
                   sendData, sendData.length, receivePacket.getAddress(), receivePacket.getPort());
           serverSocket.send(sendPacket);
-
           System.out.println("[" + servant.getServerID() + "] UDP Response: " + response);
         } catch (SocketTimeoutException ignored) {
           // Periodic wake-up to check running flag.
@@ -102,6 +118,30 @@ public class UDPServer implements Runnable {
     } finally {
       socket = null;
     }
+  }
+
+  static boolean isProtocolPayload(String payload) {
+    String firstToken = extractFirstToken(payload);
+    if (firstToken == null || firstToken.isEmpty()) {
+      return false;
+    }
+    try {
+      UDPMessage.Type.valueOf(firstToken);
+      return true;
+    } catch (IllegalArgumentException ignored) {
+      return false;
+    }
+  }
+
+  private static String extractFirstToken(String payload) {
+    if (payload == null) {
+      return null;
+    }
+    int delimiterIndex = payload.indexOf(':');
+    if (delimiterIndex < 0) {
+      return payload.trim();
+    }
+    return payload.substring(0, delimiterIndex).trim();
   }
 
   public void stop() {

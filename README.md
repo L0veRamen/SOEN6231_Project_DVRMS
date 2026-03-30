@@ -31,6 +31,11 @@ Three rental offices — Montreal (MTL), Winnipeg (WPG), and Banff (BNF) — ser
 | **Replica Manager** | One per replica; heartbeat monitoring, consensus voting, replacement + state transfer |
 | **Replica** | State machine with holdback queue, state snapshot/restore, Byzantine mode toggle |
 
+## Documentation Archive
+
+Historical implementation/workflow markdown documents were archived under `archived/`.
+The active closeout audit remains `PROJECT2_GROUP_BASE_AUDIT.md` in the project root.
+
 ## Project Structure
 
 ```

@@ -4,6 +4,34 @@
 
 - JDK 8 or higher (`java`, `javac`, `wsgen`, `wsimport` on PATH)
 - Apache Maven 3.x
+- `nc` (netcat) — used for fault injection commands
+- `lsof` — used for port checks and crash simulation
+
+## Preflight
+
+Verify required tools:
+
+```bash
+for cmd in java mvn wsimport nc lsof; do
+  command -v "$cmd" >/dev/null && echo "OK   $cmd" || echo "MISS $cmd"
+done
+```
+
+Kill stale processes from previous runs:
+
+```bash
+pkill -f "server.ReplicaLauncher|server.Sequencer|server.FrontEnd|server.ReplicaManager" || true
+```
+
+Verify ports are free (should return empty):
+
+```bash
+lsof -nP \
+  -iTCP:8080 \
+  -iUDP:9000 -iUDP:9100 \
+  -iUDP:6001 -iUDP:6002 -iUDP:6003 -iUDP:6004 \
+  -iUDP:7001 -iUDP:7002 -iUDP:7003 -iUDP:7004
+```
 
 ## Build
 
@@ -11,14 +39,12 @@
 mvn clean compile
 ```
 
-Without Maven, compile manually:
+Without Maven, compile manually then use `java -cp bin` instead of `java -cp target/classes`:
 
 ```bash
 mkdir -p bin
 javac -d bin src/main/java/model/*.java src/main/java/server/*.java
 ```
-
-Then use `java -cp bin` instead of `java -cp target/classes` in the commands below.
 
 ## Run Tests
 
@@ -26,119 +52,148 @@ Then use `java -cp bin` instead of `java -cp target/classes` in the commands bel
 mvn test
 ```
 
-## Start the System (localhost)
+## Start the System
 
-Start each component in a **separate terminal**, in this order:
+Open 7 terminals. Start each component in order — wait for the expected log before moving to the next.
 
-### 1. Sequencer
+### Terminal 1 — Sequencer
 
 ```bash
 java -cp target/classes server.Sequencer
 ```
 
-### 2. Replicas (one per terminal)
+Expected: `Sequencer listening on port 9100`
 
-```bash
-java -cp target/classes server.ReplicaLauncher 1
-java -cp target/classes server.ReplicaLauncher 2
-java -cp target/classes server.ReplicaLauncher 3
-java -cp target/classes server.ReplicaLauncher 4
-```
-
-### 3. Replica Managers (one per terminal)
+### Terminal 2 — Replica Manager 1
 
 ```bash
 java -cp target/classes server.ReplicaManager 1
+```
+
+Expected: `RM1: Replica launched on port 6001`
+
+### Terminal 3 — Replica Manager 2
+
+```bash
 java -cp target/classes server.ReplicaManager 2
+```
+
+Expected: `RM2: Replica launched on port 6002`
+
+### Terminal 4 — Replica Manager 3
+
+```bash
 java -cp target/classes server.ReplicaManager 3
+```
+
+Expected: `RM3: Replica launched on port 6003`
+
+### Terminal 5 — Replica Manager 4
+
+```bash
 java -cp target/classes server.ReplicaManager 4
 ```
 
-**Note:** RMs launch replicas automatically — skip step 2 if using RMs.
+Expected: `RM4: Replica launched on port 6004`
 
-### 4. Front End
+### Terminal 6 — Front End
 
 ```bash
 java -cp target/classes server.FrontEnd
 ```
 
+Expected: `FrontEnd published at http://localhost:8080/fe`
+
 SOAP endpoint: `http://localhost:8080/fe?wsdl`
 
-### 5. Clients
+### Terminal 7 — Client
+
+Build client stubs against the FE WSDL:
 
 ```bash
 ./build-client.sh --wsdl http://localhost:8080/fe?wsdl
-java -cp bin client.CustomerClient
-java -cp bin client.ManagerClient
 ```
 
-## A3 Standalone Mode (dev/debug)
-
-To test business logic without the replication layer:
+Run the manager client:
 
 ```bash
-./start-server.sh                                        # starts MTL:8081, WPG:8082, BNF:8083
-./build-client.sh --wsdl http://localhost:8081/mtl?wsdl   # in another terminal
-java -cp bin client.CustomerClient
+java -cp bin client.ManagerClient --wsdl http://localhost:8080/fe?wsdl
 ```
 
-## Failure Scenarios
-
-**Prerequisite:** Full system running (Sequencer → 4 RMs → FE) before each scenario.
-
-### Scenario 1: Byzantine Fault (T6–T10)
-
-A Byzantine replica returns incorrect results. The FE detects via voting.
+Run the customer client:
 
 ```bash
-# 1. Enable Byzantine mode on Replica 3
+java -cp bin client.CustomerClient --wsdl http://localhost:8080/fe?wsdl
+```
+
+The client prompts for an ID at startup. The first 3 characters choose the office, the 4th character chooses the role (`M` = manager, `U` = customer):
+
+| Role | MTL | WPG | BNF |
+|---|---|---|---|
+| Manager | MTLM1000 | WPGM1000 | BNFM1000 |
+| Customer | MTLU1000 | WPGU1000 | BNFU1000 |
+
+To run multiple clients at once, open additional terminals and repeat the `java -cp bin ...` command with a different ID each time.
+
+Run menu option **3** (List Available Vehicles) once as a baseline sanity check.
+
+### Alternative — One-Command Startup
+
+Instead of opening 7 terminals manually, use the startup script:
+
+```bash
+./demo-start.sh
+```
+
+This launches all 6 server components in the background, builds the client, and prints ready status. Logs go to `logs/`. Stop everything with:
+
+```bash
+./demo-stop.sh
+```
+
+## Failure Scenarios (Quick Reference)
+
+Full system must be running (Sequencer + 4 RMs + FE) before each scenario.
+
+For detailed step-by-step demo scenarios with narration cues and expected logs, see [FAILURE_DEMO_SETUP.md](FAILURE_DEMO_SETUP.md).
+
+### Byzantine — enable on Replica 3
+
+```bash
 echo -n "SET_BYZANTINE:true" | nc -u -w1 localhost 6003
+```
 
-# 2. Send 3+ SOAP requests via client
-java -cp bin client.CustomerClient
-#    → FE receives 3 correct + 1 incorrect result per request
-#    → FE increments byzantineCount for Replica 3
+### Byzantine — disable on Replica 3
 
-# 3. After 3 consecutive faults, FE sends REPLACE_REQUEST to RMs
-#    → RM 3 kills Replica 3, launches a new one
-#    → New replica receives state transfer from a healthy replica
-#    → byzantineCount resets to 0
-
-# 4. Disable (if testing manually without replacement)
+```bash
 echo -n "SET_BYZANTINE:false" | nc -u -w1 localhost 6003
 ```
 
-### Scenario 2: Crash Fault (T11–T14)
-
-A crashed replica stops responding entirely.
+### Crash — kill Replica 2
 
 ```bash
-# 1. Kill Replica 2
-kill $(lsof -ti udp:6002)
-
-# 2. Send SOAP requests
-#    → FE times out waiting for Replica 2 (timeout = 2x slowest response)
-#    → FE sends CRASH_SUSPECT to all RMs
-#    → RMs verify via heartbeat, reach majority consensus
-#    → RM 2 launches a new replica, performs state transfer
-#    → Sequencer replays missed messages to new replica
+kill $(lsof -ti udp:6002 | head -n1)
 ```
 
-### Scenario 3: Simultaneous Byzantine + Crash (T15–T17)
-
-One replica crashes, another is Byzantine — the system still returns correct results.
+### Simultaneous — crash Replica 2 + Byzantine Replica 3
 
 ```bash
-# 1. Kill Replica 2
-kill $(lsof -ti udp:6002)
-
-# 2. Enable Byzantine on Replica 3
+kill $(lsof -ti udp:6002 | head -n1)
 echo -n "SET_BYZANTINE:true" | nc -u -w1 localhost 6003
+```
 
-# 3. Send SOAP requests
-#    → 3 replicas respond: R1 (correct), R3 (Byzantine), R4 (correct)
-#    → FE gets f+1 = 2 matching results (R1 + R4), returns correct answer
-#    → Both faults detected and handled independently
+### Reset between scenarios
+
+Minimal reset:
+
+```bash
+echo -n "SET_BYZANTINE:false" | nc -u -w1 localhost 6003 || true
+```
+
+Full reset (then restart from Terminal 1):
+
+```bash
+pkill -f "server.ReplicaLauncher|server.Sequencer|server.FrontEnd|server.ReplicaManager" || true
 ```
 
 ### Test Scenario Summary
@@ -177,10 +232,33 @@ Per-replica office ports (inter-office UDP):
 **Port already in use:**
 
 ```bash
-lsof -i :6001                          # check who holds the port
+lsof -i :6001
+```
+
+```bash
 pkill -f "server.ReplicaLauncher|server.Sequencer|server.FrontEnd|server.ReplicaManager"
 ```
 
-**WSDL not reachable:** Make sure FE is running first. `build-client.sh` auto-waits up to 30s.
+**WSDL not reachable:** Make sure FE (Terminal 6) is running first. `build-client.sh` auto-waits up to 30s.
 
 **UDP bind errors in tests:** The `Address already in use` messages during `mvn test` are expected and harmless — test stubs pass regardless.
+
+## Appendix — A3 Standalone Mode (dev/debug)
+
+To test business logic without the replication layer:
+
+```bash
+./start-server.sh
+```
+
+In another terminal:
+
+```bash
+./build-client.sh --wsdl http://localhost:8081/mtl?wsdl
+```
+
+```bash
+java -cp bin client.CustomerClient
+```
+
+This starts three standalone offices (MTL:8081, WPG:8082, BNF:8083) without Sequencer, RMs, or FE.

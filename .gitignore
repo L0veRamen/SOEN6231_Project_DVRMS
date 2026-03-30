@@ -9,6 +9,8 @@ target/
 .idea/jarRepositories.xml
 .idea/compiler.xml
 .idea/libraries/
+.idea/copilot.data.migration.ask2agent.xml
+.idea/*
 *.iws
 *.iml
 *.ipr
@@ -34,6 +36,10 @@ build/
 
 ### VS Code ###
 .vscode/
+.metals/
+
 
 ### Mac OS ###
 .DS_Store
+
+logs/*
