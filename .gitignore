@@ -37,7 +37,8 @@ build/
 ### VS Code ###
 .vscode/
 .metals/
-
+.cursor/
+.claude/
 
 ### Mac OS ###
 .DS_Store
