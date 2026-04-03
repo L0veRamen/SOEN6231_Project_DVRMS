@@ -1,35 +1,40 @@
 package unit.ReplicaManager;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import server.PortConfig;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 public class PortConfigTest {
 
-    @Test
-    void rmAndReplicaPorts() {
-        assertEquals(7001, PortConfig.RM_1);
-        assertEquals(7002, PortConfig.RM_2);
-        assertEquals(7003, PortConfig.RM_3);
-        assertEquals(7004, PortConfig.RM_4);
-        assertArrayEquals(new int[]{7001, 7002, 7003, 7004}, PortConfig.ALL_RMS);
+    @ParameterizedTest(name = "replicaId={0} → rmPort={1}, replicaPort={2}")
+    @CsvSource({
+        "1, 7001, 6001",
+        "2, 7002, 6002",
+        "3, 7003, 6003",
+        "4, 7004, 6004"
+    })
+    void rmAndReplicaPorts(int id, int expectedRmPort, int expectedReplicaPort) {
+        assertEquals(expectedRmPort,      PortConfig.ALL_RMS[id - 1],      "RM port mismatch for id=" + id);
+        assertEquals(expectedReplicaPort, PortConfig.ALL_REPLICAS[id - 1], "Replica port mismatch for id=" + id);
+    }
 
-        assertEquals(6001, PortConfig.REPLICA_1);
-        assertEquals(6002, PortConfig.REPLICA_2);
-        assertEquals(6003, PortConfig.REPLICA_3);
-        assertEquals(6004, PortConfig.REPLICA_4);
-        assertArrayEquals(new int[]{6001, 6002, 6003, 6004}, PortConfig.ALL_REPLICAS);
+    @ParameterizedTest(name = "replica={0}, office={1} → port={2}")
+    @CsvSource({
+        "1, MTL, 5001",
+        "1, WPG, 5002",
+        "1, BNF, 5003",
+        "2, WPG, 5012",
+        "4, BNF, 5033"
+    })
+    void officePortMapping(int replicaId, String office, int expectedPort) {
+        assertEquals(expectedPort, PortConfig.officePort(replicaId, office));
     }
 
     @Test
-    void officePortMapping() {
-        assertEquals(5001, PortConfig.officePort(1, "MTL"));
-        assertEquals(5002, PortConfig.officePort(1, "WPG"));
-        assertEquals(5003, PortConfig.officePort(1, "BNF"));
-        assertEquals(5012, PortConfig.officePort(2, "WPG"));
-        assertEquals(5033, PortConfig.officePort(4, "BNF"));
-
+    void officePortThrowsOnUnknown() {
         assertThrows(IllegalArgumentException.class, () -> PortConfig.officePort(1, "TORONTO"));
     }
 }
