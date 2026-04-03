@@ -79,48 +79,49 @@ Full system is started once in `@BeforeAll`: Sequencer + 4 RMs + 4 Replicas + FE
 | U11 | `malformedFaultNotifications_areIgnoredWithoutExceptions` | Malformed fault notification messages sent to RM | Silently ignored; no exception |
 | U12 | `crashSuspect_parsesNumericIdAndBroadcastsVote` | FE sends `CRASH_SUSPECT` with numeric replica ID | Vote parsed and broadcast to all peer RMs |
 | U13 | `replaceReplica_requestsStateInitializesAndBuildsReadyMessage` | Replacement triggered for a replica | State requested → replica initialized → `REPLICA_READY` broadcast |
+| U14 | `feFaultNotification_getsAckFromRmPath` | FE sends fault notification (e.g. `CRASH_SUSPECT`) to RM | RM replies with `ACK:` message back to FE |
 
 ### `FrontEndTest.java`
 
 | Test ID | Test Method | Scenario | Expected Outcome |
 |---------|-------------|----------|-----------------|
-| U14 | `majorityVoting_returnsCorrectResult` | 3 replicas return results; 2 match | Matching result returned to caller |
-| U15 | `byzantineCounter_incrementsOnMismatch_resetsOnMatch` | Replica sends mismatch then correct result | Counter increments on mismatch; resets to 0 on match |
-| U16 | `byzantineThreshold_triggersReplaceRequest` | Same replica mismatches 3 times in a row | `REPLACE_REQUEST` sent after 3rd mismatch |
-| U17 | `crashSuspect_reportedForNonRespondingReplica` | Replica never responds within timeout | `CRASH_SUSPECT` sent to all RMs |
+| U15 | `majorityVoting_returnsCorrectResult` | 3 replicas return results; 2 match | Matching result returned to caller |
+| U16 | `byzantineCounter_incrementsOnMismatch_resetsOnMatch` | Replica sends mismatch then correct result | Counter increments on mismatch; resets to 0 on match |
+| U17 | `byzantineThreshold_triggersReplaceRequest` | Same replica mismatches 3 times in a row | `REPLACE_REQUEST` sent after 3rd mismatch |
+| U18 | `crashSuspect_reportedForNonRespondingReplica` | Replica never responds within timeout | `CRASH_SUSPECT` sent to all RMs |
 
 ### `SequencerTest.java`
 
 | Test ID | Test Method | Scenario | Expected Outcome |
 |---------|-------------|----------|-----------------|
-| U18 | `requestHandling_assignsMonotonicallyIncreasingSeqNums` | 3 sequential requests sent to Sequencer | seqNums 0, 1, 2 assigned in order |
-| U19 | `nackHandling_replaysHistoryBufferForMissedRange` | Replica sends NACK for gap in seq 0–1 | Sequencer replays messages from historyBuffer |
-| U20 | `replicaReady_triggersReplayAndUpdatesReplicaList` | New replica sends `REPLICA_READY:id:lastSeq` | Sequencer adds replica to multicast list; replays from lastSeq+1 |
+| U19 | `requestHandling_assignsMonotonicallyIncreasingSeqNums` | 3 sequential requests sent to Sequencer | seqNums 0, 1, 2 assigned in order |
+| U20 | `nackHandling_replaysHistoryBufferForMissedRange` | Replica sends NACK for gap in seq 0–1 | Sequencer replays messages from historyBuffer |
+| U21 | `replicaReady_triggersReplayAndUpdatesReplicaList` | New replica sends `REPLICA_READY:id:lastSeq` | Sequencer adds replica to multicast list; replays from lastSeq+1 |
 
 ### `ReplicaLauncherBehaviorTest.java`
 
 | Test ID | Test Method | Scenario | Expected Outcome |
 |---------|-------------|----------|-----------------|
-| U21 | `gapDelivery_emitsNumericNackAndAck` | Out-of-order EXECUTE received (seq gap) | NACK sent for missing seq; ACK sent for received seq |
-| U22 | `extractTargetOffice_routesByOperationShapeAndFallsBackSafely` | Various operation strings tested for office routing | Correct office extracted; unknown ops fall back to default |
+| U22 | `gapDelivery_emitsNumericNackAndAck` | Out-of-order EXECUTE received (seq gap) | NACK sent for missing seq; ACK sent for received seq |
+| U23 | `extractTargetOffice_routesByOperationShapeAndFallsBackSafely` | Various operation strings tested for office routing | Correct office extracted; unknown ops fall back to default |
 
 ### `ReliableUDPSenderTest.java`
 
 | Test ID | Test Method | Scenario | Expected Outcome |
 |---------|-------------|----------|-----------------|
-| U23 | `ackReceived_returnsTrue` | Server replies with ACK | `send()` returns `true` |
-| U24 | `allRetriesExhausted_returnsFalse` | Server replies with non-ACK on all retries | `send()` returns `false` after exhausting retries |
+| U24 | `ackReceived_returnsTrue` | Server replies with ACK | `send()` returns `true` |
+| U25 | `allRetriesExhausted_returnsFalse` | Server replies with non-ACK on all retries | `send()` returns `false` after exhausting retries |
 
 ### `VehicleReservationWSTest.java`
 
 | Test ID | Test Method | Scenario | Expected Outcome |
 |---------|-------------|----------|-----------------|
-| U25 | `byzantineHandleExecute_sendsResultToFe` | Replica in Byzantine mode executes request | Result (possibly wrong) sent back to FE |
-| U26 | `executePath_reserveCancel_enforcesHomeOfficeBudgetAndCrossOfficeLimit` | Reserve home vehicle → cross-office limit → budget check | Home: SUCCESS with budget deducted; cross-office limit enforced |
-| U27 | `remoteUdpReservePath_remainsBudgetNeutral` | Remote UDP reservation path exercised | Budget unchanged on requester side (remote path) |
+| U26 | `byzantineHandleExecute_sendsResultToFe` | Replica in Byzantine mode executes request | Result (possibly wrong) sent back to FE |
+| U27 | `executePath_reserveCancel_enforcesHomeOfficeBudgetAndCrossOfficeLimit` | Reserve home vehicle → cross-office limit → budget check | Home: SUCCESS with budget deducted; cross-office limit enforced |
+| U28 | `remoteUdpReservePath_remainsBudgetNeutral` | Remote UDP reservation path exercised | Budget unchanged on requester side (remote path) |
 
 ### `UDPServerCompatibilityTest.java`
 
 | Test ID | Test Method | Scenario | Expected Outcome |
 |---------|-------------|----------|-----------------|
-| U28 | `legacyPayload_isHandledWithoutProtocolAckFraming` | Legacy payload without ACK framing sent to UDP server | Handled gracefully; no crash or protocol error |
+| U29 | `legacyPayload_isHandledWithoutProtocolAckFraming` | Legacy payload without ACK framing sent to UDP server | Handled gracefully; no crash or protocol error |
