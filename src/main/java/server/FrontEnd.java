@@ -10,6 +10,48 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 
+/**
+ * Front End (FE) — single instance, the sole entry point for client requests in the FT-DVRMS system.
+ *
+ * <p>The FE is responsible for:
+ * <ol>
+ *   <li>Exposing all vehicle-reservation operations as JAX-WS {@code @WebMethod}s (SOAP port 8080).</li>
+ *   <li>Forwarding each client request to the Sequencer via reliable UDP for total-order delivery.</li>
+ *   <li>Collecting {@code RESULT} messages from replicas on a background listener thread and
+ *       resolving the majority answer.</li>
+ *   <li>Detecting Byzantine faults (3 consecutive mismatches from the same replica) and sending
+ *       a {@code REPLACE_REQUEST} to all RMs.</li>
+ *   <li>Detecting crash faults (replica did not respond) and sending a {@code CRASH_SUSPECT}
+ *       to all RMs.</li>
+ * </ol>
+ *
+ * <p><b>Workflow overview:</b>
+ * <pre>
+ *   Client (SOAP)
+ *       │
+ *       ▼
+ *   {@literal @}WebMethod ──→ forwardAndCollect()
+ *       │  REQUEST:reqID:localhost:FE_UDP:operation  ──→  Sequencer
+ *       │
+ *       │  (background thread: FE-ResultListener)
+ *       │  ◄── RESULT:seqNum:reqID:replicaID:payload  (from replicas)
+ *       │       addResult() ──→ 2+ matching ──→ majorityFuture.complete()
+ *       │
+ *       ▼  (majority ready OR timeout)
+ *   processResults()
+ *       │
+ *       ├─ mismatch ──→ INCORRECT_RESULT to all RMs
+ *       │               3 strikes ──→ REPLACE_REQUEST to all RMs
+ *       │
+ *       └─ no reply ──→ CRASH_SUSPECT to all RMs
+ * </pre>
+ *
+ * <p>Usage: {@code java server.FrontEnd}
+ *
+ * @see PortConfig for FE and RM port assignments
+ * @see UDPMessage for message format definitions
+ * @see ReliableUDPSender for ACK-based reliable UDP with exponential backoff
+ */
 @WebService(name = "VehicleReservationWS", serviceName = "VehicleReservationService")
 public class FrontEnd {
 
@@ -60,6 +102,16 @@ public class FrontEnd {
 
     // ===== @WebMethod — same signatures as VehicleReservationWS =====
 
+    /**
+     * Adds a vehicle to the fleet at the given manager's location.
+     *
+     * @param managerID        the ID of the manager performing the operation
+     * @param vehicleNumber    total number of vehicles of this type available
+     * @param vehicleType      category of the vehicle (e.g., car, van, SUV)
+     * @param vehicleID        unique vehicle identifier
+     * @param reservationPrice daily reservation price
+     * @return success or failure message from the majority of replicas
+     */
     @WebMethod
     public String addVehicle(
             @WebParam(name = "managerID") String managerID,
@@ -71,6 +123,13 @@ public class FrontEnd {
         return forwardAndCollect(operation);
     }
 
+    /**
+     * Removes a vehicle from the fleet at the given manager's location.
+     *
+     * @param managerID the ID of the manager performing the operation
+     * @param vehicleID unique identifier of the vehicle to remove
+     * @return success or failure message from the majority of replicas
+     */
     @WebMethod
     public String removeVehicle(
             @WebParam(name = "managerID") String managerID,
@@ -79,12 +138,30 @@ public class FrontEnd {
         return forwardAndCollect(operation);
     }
 
+    /**
+     * Lists all available vehicles at the given manager's location.
+     *
+     * @param managerID the ID of the manager whose inventory is queried
+     * @return a formatted list of available vehicles from the majority of replicas
+     */
     @WebMethod
     public String listAvailableVehicle(@WebParam(name = "managerID") String managerID) {
         String operation = "LISTAVAILABLE:" + managerID;
         return forwardAndCollect(operation);
     }
 
+    /**
+     * Reserves a vehicle for a customer over the given date range.
+     *
+     * <p>Routed as an execute-path operation so that home-office reservation logic
+     * (A3) is applied correctly at the replica matching the customer's city prefix.
+     *
+     * @param customerID the customer's ID (city prefix determines home office)
+     * @param vehicleID  unique identifier of the vehicle to reserve
+     * @param startDate  reservation start date
+     * @param endDate    reservation end date
+     * @return success or failure message from the majority of replicas
+     */
     @WebMethod
     public String reserveVehicle(
             @WebParam(name = "customerID") String customerID,
@@ -96,6 +173,17 @@ public class FrontEnd {
         return forwardAndCollect(operation);
     }
 
+    /**
+     * Updates the date range of an existing reservation.
+     *
+     * <p>Routed as an execute-path operation so that home-office logic is preserved.
+     *
+     * @param customerID   the customer's ID
+     * @param vehicleID    unique identifier of the reserved vehicle
+     * @param newStartDate updated reservation start date
+     * @param newEndDate   updated reservation end date
+     * @return success or failure message from the majority of replicas
+     */
     @WebMethod
     public String updateReservation(
             @WebParam(name = "customerID") String customerID,
@@ -108,6 +196,15 @@ public class FrontEnd {
         return forwardAndCollect(operation);
     }
 
+    /**
+     * Cancels an existing reservation for a customer.
+     *
+     * <p>Routed as an execute-path operation so that home-office logic is preserved.
+     *
+     * @param customerID the customer's ID
+     * @param vehicleID  unique identifier of the reserved vehicle
+     * @return success or failure message from the majority of replicas
+     */
     @WebMethod
     public String cancelReservation(
             @WebParam(name = "customerID") String customerID,
@@ -117,6 +214,13 @@ public class FrontEnd {
         return forwardAndCollect(operation);
     }
 
+    /**
+     * Finds vehicles of a given type available across all city offices.
+     *
+     * @param customerID  the customer's ID
+     * @param vehicleType category of vehicle to search for
+     * @return a formatted list of matching vehicles from the majority of replicas
+     */
     @WebMethod
     public String findVehicle(
             @WebParam(name = "customerID") String customerID,
@@ -125,12 +229,27 @@ public class FrontEnd {
         return forwardAndCollect(operation);
     }
 
+    /**
+     * Lists all active reservations for a customer.
+     *
+     * @param customerID the customer whose reservations are queried
+     * @return a formatted list of reservations from the majority of replicas
+     */
     @WebMethod
     public String listCustomerReservations(@WebParam(name = "customerID") String customerID) {
         String operation = "LISTRES:" + customerID;
         return forwardAndCollect(operation);
     }
 
+    /**
+     * Adds a customer to the wait list for a vehicle over a given date range.
+     *
+     * @param customerID the customer's ID
+     * @param vehicleID  unique identifier of the desired vehicle
+     * @param startDate  requested start date
+     * @param endDate    requested end date
+     * @return success or failure message from the majority of replicas
+     */
     @WebMethod
     public String addToWaitList(
             @WebParam(name = "customerID") String customerID,
@@ -143,6 +262,16 @@ public class FrontEnd {
 
     // ===== Core: forward to Sequencer and collect results =====
 
+    /**
+     * Forwards an operation to the Sequencer and collects the majority result from replicas.
+     *
+     * <p>Sends {@code REQUEST:reqID:localhost:FE_UDP:operation} to the Sequencer, then blocks
+     * until a majority future completes or the adaptive timeout ({@code 2 × slowestResponseTime})
+     * expires. On timeout, falls back to {@link #vote(RequestContext)} over already-received results.
+     *
+     * @param operation the operation string (e.g. {@code "ADDVEHICLE:MTL001:..."})
+     * @return the majority result, or {@code "FAIL:..."} if no majority was reached
+     */
     private String forwardAndCollect(String operation) {
         String reqID = "REQ-" + requestCounter.incrementAndGet();
         RequestContext ctx = new RequestContext(reqID);
@@ -175,6 +304,13 @@ public class FrontEnd {
         return result;
     }
 
+    /**
+     * Tallies already-received replica results after a timeout to find a majority.
+     *
+     * @param ctx the request context containing partial replica results
+     * @return the first result agreed upon by 2 or more replicas,
+     *         or {@code "FAIL: No majority result"} if none exists
+     */
     private String vote(RequestContext ctx) {
         ConcurrentHashMap<String, java.util.List<String>> resultToReplicas = new ConcurrentHashMap<>();
         for (Map.Entry<String, String> entry : ctx.replicaResults.entrySet()) {
@@ -199,6 +335,19 @@ public class FrontEnd {
         return majorityResult;
     }
 
+    /**
+     * Compares each replica's result against the majority and triggers fault notifications.
+     *
+     * <p>For every replica whose result differs from {@code majorityResult}, increments its
+     * Byzantine strike counter and sends {@code INCORRECT_RESULT:reqID:seqNum:replicaID} to
+     * all RMs. On 3 strikes, also sends {@code REPLACE_REQUEST:replicaID:BYZANTINE_THRESHOLD}.
+     * For each replica that did not respond at all, sends
+     * {@code CRASH_SUSPECT:reqID:seqNum:replicaID} to all RMs.
+     * Updates {@code slowestResponseTime} and removes the request from {@code pendingRequests}.
+     *
+     * @param ctx           the completed request context
+     * @param majorityResult the agreed-upon result from the majority of replicas
+     */
     private void processResults(RequestContext ctx, String majorityResult) {
         for (Map.Entry<String, String> entry : ctx.replicaResults.entrySet()) {
             String replicaID = entry.getKey();
@@ -231,6 +380,7 @@ public class FrontEnd {
 
     // ===== UDP listener for RESULT messages =====
 
+    /** Sends {@code ACK:<token>} back to the source of a UDP packet. */
     private void ackUdpMessage(DatagramSocket socket, DatagramPacket packet, String token) {
         try {
             String ack = "ACK:" + token;
@@ -241,6 +391,19 @@ public class FrontEnd {
         }
     }
 
+    /**
+     * Background UDP listener — receives {@code RESULT} messages from replicas and routes
+     * each one to its pending {@link RequestContext}. Also ACKs {@code REPLICA_READY} messages
+     * sent by RMs after a replica replacement.
+     *
+     * <p>Listens on {@link PortConfig#FE_UDP}. Runs in a dedicated background thread.
+     *
+     * <p>Handled message types:
+     * <ul>
+     *   <li>{@code RESULT:<seqNum>:<reqID>:<replicaID>:<payload>} — replica response</li>
+     *   <li>{@code REPLICA_READY} — replacement complete notification from an RM</li>
+     * </ul>
+     */
     private void listenForResults() {
         try (DatagramSocket socket = new DatagramSocket(PortConfig.FE_UDP)) {
             byte[] buf = new byte[8192];
@@ -275,6 +438,7 @@ public class FrontEnd {
         }
     }
 
+    /** Broadcasts {@code message} to all four RM ports via reliable UDP. */
     private void sendToAllRMs(String message) {
         try {
             DatagramSocket socket = new DatagramSocket();
